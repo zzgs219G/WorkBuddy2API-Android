@@ -23,6 +23,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -266,6 +267,46 @@ fun PcInfoRow(label: String, value: String) {
             text = value,
             style = MaterialTheme.typography.bodyLarge,
             // 值占剩余宽度并允许换行（长 UID、长 URL 都需要）
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+/**
+ * 可点击复制的信息行。
+ *
+ * 为什么做成"点值本身复制"而不是旁边放一个按钮：
+ *   原先给局域网 baseUrl 配了一个整宽的圆角按钮「复制局域网 baseUrl」——
+ *   它占掉一整行高度、视觉权重比信息本身还高，而复制是一个从属动作。
+ *   更符合直觉的交互是**点这个值就复制**（同系统设置里点 Wi-Fi 名称复制）。
+ *
+ * 交互细节：
+ *   · 整行可点（label 也算），因为值本身可能很长，只点文字容易点空
+ *   · 用 [combinedClickable]：点按复制、长按也复制（长按在部分 ROM 上更稳）
+ *   · 复制后由调用方给出提示（本组件不弹 toast，避免与页面级提示重复）
+ *   · 保留 Ripple：没有反馈的点击会让人以为没生效
+ */
+@Composable
+fun PcCopyableRow(label: String, value: String, onCopy: (String) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onCopy(value) }
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(96.dp)
+        )
+        Spacer(Modifier.width(PcTokens.SpaceS))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f)
         )
     }

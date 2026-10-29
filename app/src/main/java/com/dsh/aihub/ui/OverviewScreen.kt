@@ -78,20 +78,28 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                 Text(
                     when {
                         running && lanEntry != null ->
-                            "OpenAI 兼容地址  $baseUrl（局域网 · ${lanEntry.address}）"
-                        running -> "OpenAI 兼容地址  $baseUrl"
+                            "OpenAI 兼容地址（局域网 · ${lanEntry.address}）"
+                        running -> "OpenAI 兼容地址"
                         starting -> "正在校验账号并预热模型，通常数秒内完成；若长时间无变化，请检查通知权限。"
                         else -> "启动后仅在本机提供 OpenAI 兼容 API。"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // 运行中才显示可复制的地址：没启动时复制一个连不通的地址没有意义。
+                if (running) {
+                    PcCopyableRow("baseUrl", baseUrl) {
+                        copyToClipboard(context, it)
+                        app.showMessage("已复制 Base URL：$it")
+                    }
+                }
                 Spacer(Modifier.height(PcTokens.SpaceM))
                 PcActionGrid(
                     actions = listOf(
                         // 启动中仍可点「停止」：若陷入启动异常（如上游卡住），
                         // 用户必须有办法中止，否则只能杀进程 —— 此前 disabled = !starting
                         // 会把按钮锁死，是"反复启停后再也停不掉"的观感来源之一。
+                        // 复制按钮已并入上面的可点击行，这里只留启停这一个主操作。
                         PcAction(
                             when {
                                 running -> "停止服务"
@@ -99,11 +107,7 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                                 else -> "启动服务"
                             },
                             primary = true
-                        ) { app.toggleServer(activity) },
-                        PcAction("复制地址") {
-                            copyToClipboard(context, baseUrl)
-                            app.showMessage("已复制 Base URL：$baseUrl")
-                        }
+                        ) { app.toggleServer(activity) }
                     )
                 )
             }

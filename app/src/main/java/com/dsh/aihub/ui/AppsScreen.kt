@@ -83,7 +83,11 @@ fun AppsScreen(context: Context, app: AppState) {
                 val lanEnabled = app.settings.optString("lanAccess", "0") in setOf("1", "true")
                 val lan = remember(lanEnabled) { if (lanEnabled) LanAddress.primary() else null }
                 val baseUrl = LanAddress.baseUrl(ApiHostService.PORT, lan)
-                PcInfoRow("Base URL", baseUrl)
+                // 点击即复制，不额外占一行放按钮。
+                PcCopyableRow("Base URL", baseUrl) {
+                    copyToClipboard(context, it)
+                    app.showMessage("已复制 Base URL：$it")
+                }
                 if (lanEnabled) {
                     if (lan == null) {
                         PcInfoRow("局域网", "已开启，但未检测到可用的局域网网卡")
@@ -95,14 +99,14 @@ fun AppsScreen(context: Context, app: AppState) {
                 PcInfoRow("兼容请求头", "X-Api-Key: <你的 Key>")
                 Spacer(Modifier.height(PcTokens.SpaceM))
                 Row(horizontalArrangement = Arrangement.spacedBy(PcTokens.SpaceS)) {
-                    // M3 的 TextButton 没有 `text =` 参数（Miuix 有），文案改由尾随 lambda 承载。
+                    // 认证格式不是 URL，仍用按钮（它的值是模板，点击复制的语义不直观）。
                     TextButton(
                         onClick = {
-                            copyToClipboard(context, baseUrl)
-                            app.showMessage("已复制 Base URL：$baseUrl")
+                            copyToClipboard(context, "Authorization: Bearer <你的 Key>")
+                            app.showMessage("已复制认证格式")
                         },
                         modifier = Modifier.weight(1f)
-                    ) { Text("复制地址") }
+                    ) { Text("复制认证格式") }
                     TextButton(
                         onClick = {
                             copyToClipboard(context, "Authorization: Bearer <你的 Key>")

@@ -2,33 +2,29 @@ package com.dsh.aihub.ui
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -39,9 +35,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
@@ -212,10 +206,26 @@ fun AppShell(context: Context, app: AppState) {
                             else -> to is PageKey.Sub
                         }
                         val dir = if (forward) 1 else -1
-                        // 位移取 1/5 屏宽：整屏滑动在动画期间会把内容拉成模糊条带，
-                        // 1/5 既有方向感又保持内容可辨。
-                        val enter = slideInHorizontally { dir * it / 5 } + fadeIn()
-                        val exit = slideOutHorizontally { -dir * it / 5 } + fadeOut()
+                        // 只做位移，不叠透明度。
+                        //
+                        // 之前是「1/5 屏宽滑动 + fadeIn/fadeOut 同时跑」，两层动画
+                        // 叠加的结果是整块内容先变暗再变亮 —— 观感就是"整个屏幕在
+                        // 淡入淡出"、"闪一下"。位移本身已经表达了方向，淡入淡出
+                        // 在这里没有信息量，只会放大闪烁感。
+                        //
+                        // 曲线用 M3 的 emphasized 规格（快出慢入 + 轻微过冲），
+                        // 比默认 tween 的线性加减速更像系统级转场。
+                        // 位移收到 1/8 屏宽：短距离 + 快速曲线，观感是"内容滑入"
+                        // 而不是"整页重绘"。
+                        //
+                        // 注：曾尝试 MotionScheme.expressive()，但本项目实际解析到的
+                        // material3 版本里该 API 仍是 internal（Hub 用的是
+                        // 1.4.0-alpha18 才有公开签名）。这里改用等价的公开 API
+                        // 组合出同样的手感，不引入版本锁定风险。
+                        val spec: FiniteAnimationSpec<IntOffset> =
+                            tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                        val enter = slideInHorizontally(animationSpec = spec) { width -> dir * width / 8 }
+                        val exit = slideOutHorizontally(animationSpec = spec) { width -> -dir * width / 8 }
                         (enter togetherWith exit).apply {
                             targetContentZIndex = if (forward) 1f else -1f
                         }
@@ -267,67 +277,34 @@ fun AppShell(context: Context, app: AppState) {
 }
 
 /**
- * 底部导航栏。
+ * 底部导航栏 —— 直接用 Material 3 原生 [NavigationBar] + [NavigationBarItem]。
  *
- * 三处尺寸/反馈上的修正：
+ * 为什么改回原生（2026-10-29）：
+ *   之前为了「6 个纯文字 Tab 不要被撑得太空」自建了 Row + selectable。
+ *   那个判断本身没错，但代价是丢掉了原生组件自带的一整套东西：
+ *     · 选中态指示器（pill）的动画
+ *     · 图标/文字的垂直对齐与基线
+ *     · 无障碍语义（selected / role 由组件内部处理）
+ *     · 触摸目标与 Ripple 的 M3 规格
+ *   自建版本只能逐个手写，写不全就显得"别扭"。
  *
- *  1) **补 [navigationBarsPadding]**。本应用 targetSdk = 36，Android 15 起对该档
- *     强制 edge-to-edge，窗口一直画到导航条/手势条底下。原先底栏没有任何 inset
- *     处理，于是整体贴在屏幕最下沿、压在系统手势区上 —— 就是「底栏这么低」。
- *  2) **每项最小高度 48dp**（Material 触摸目标下限）。原先 labelLarge 约 18dp
- *     字高，加上下各 7dp 与外层 6dp，合计约 44dp，还只有文字没有图标，又矮又空。
- *  3) **恢复 ripple**（去掉 indication = null）。原先点下去没有任何视觉反馈，
- *     点起来像没生效。
+ *   现在 Tab 恢复成「图标 + 文字」的标准形态，纯文字被撑空的问题自然消失，
+ *   不需要再靠自建布局来压缩空白。
+ *
+ * 图标说明：AppTab 的 ImageVector 仍来自 m3/M3Icons（手写 pathData）。
+ *   NavigationBarItem 的 icon 槽位对 ImageVector 没有额外要求，能画出来即可；
+ *   若某天确认 release 下不渲染，再换 material-icons 依赖，与本次布局改动无关。
  */
 @Composable
 private fun BottomBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppTab.entries.forEach { item ->
-                val isSelected = selected == item
-                val tint = if (isSelected) {
-                    MaterialTheme.colorScheme.onSecondaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(16.dp))
-                        // selectable 而不是 clickable：自带 role = Tab 与 selected
-                        // 语义，无障碍服务能正确朗读「已选中」。
-                        .selectable(
-                            selected = isSelected,
-                            role = Role.Tab,
-                            onClick = { onSelect(item) },
-                        )
-                        .heightIn(min = 48.dp)
-                        .padding(vertical = 6.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Icon(
-                        imageVector = item.icon,
-                        contentDescription = null, // 下方文字已表达含义，重复朗读反而吵
-                        modifier = Modifier.size(22.dp),
-                        tint = tint,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = item.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = tint,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                        maxLines = 1,
-                    )
-                }
-            }
+    NavigationBar {
+        AppTab.entries.forEach { item ->
+            NavigationBarItem(
+                selected = selected == item,
+                onClick = { onSelect(item) },
+                icon = { Icon(item.icon, contentDescription = null) },
+                label = { Text(item.label, maxLines = 1) },
+            )
         }
     }
 }

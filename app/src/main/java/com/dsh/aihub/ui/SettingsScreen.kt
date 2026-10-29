@@ -176,17 +176,11 @@ fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                         PcInfoRow("局域网地址", "未检测到可用的局域网网卡（请确认已连 WiFi）")
                     } else {
                         PcInfoRow("局域网地址", lan.address)
-                        PcInfoRow("客户端 baseUrl", LanAddress.baseUrl(ApiHostService.PORT, lan))
-                        PcActionGrid(
-                            actions = listOf(
-                                PcAction("复制局域网 baseUrl", primary = true) {
-                                    copyToClipboard(
-                                        context,
-                                        LanAddress.baseUrl(ApiHostService.PORT, lan),
-                                    )
-                                }
-                            )
-                        )
+                        // 点击这一行即复制 —— 不额外占一行放按钮。
+                        PcCopyableRow("客户端 baseUrl", LanAddress.baseUrl(ApiHostService.PORT, lan)) {
+                            copyToClipboard(context, it)
+                            app.showMessage("已复制：$it")
+                        }
                     }
                 }
                 // 更新入口放在「关于」而非独立 Tab：更新是低频操作，
