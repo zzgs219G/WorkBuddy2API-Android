@@ -58,5 +58,60 @@ jobs:
 
       # 只编译，不出包。assemble 会走签名流程，而 release keystore
       # 不在 CI 里，产出的包反而会误导使用者。
+      #
+      # 日志重定向到文件再打印：编译错误的行很长（含 URL 编码的绝对路径），
+      # 直接打在 step 日志里会被 GitHub 截断；同时用 ::error:: 输出一份精简版，
+      # 这样错误会出现在 Actions 的 annotation 区 —— 那里不登录也能读到，
+      # 比翻 step 日志方便。
       - name: Compile check
-        run: ./gradlew :app:compileDebugKotlin :app:compileReleaseKotlin --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew :app:compileDebugKotlin :app:compileReleaseKotlin --stacktrace --console=plain 2>&1 | tee compile.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            # 只挑 Kotlin 编译错误行（e: 开头）发成 annotation，最多 20 条
+            grep -E "^e: " compile.log | head -20 | while IFS= read -r line; do
+              # 去掉 file:// 前缀并把 %XX 解成可读字符，否则 annotation 里没法看
+              echo "::error::$(printf '%b' "${line//%/\\x}")"
+            done
+          fi
+          exit "$STATUS"
+
+      # 单元测试。
+      #
+      # 为什么必须在云端跑：本地编译通过不代表逻辑正确 —— 这个项目已经踩过两次
+      # 「编译通过、运行无报错、只是什么都不做」的静默失效（PromptRules 的
+      # 模板句替换左右两侧写成了一样、FINGERPRINT_MARKERS 门禁漏掉身份句触发词）。
+      # 那两次都是靠 PromptSanitizeTest 才抓出来的，而原先 CI 根本不跑测试。
+      #
+      # testDebugUnitTest 是纯 JVM 测试，不需要模拟器，几十秒能跑完。
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          ./gradlew :app:testDebugUnitTest --stacktrace --console=plain 2>&1 | tee test.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            # 失败的用例名与断言消息在 XML 里最清楚，直接抽出来发 annotation
+            python3 - <<'EOF'
+          import glob, xml.etree.ElementTree as ET, urllib.parse
+          for path in glob.glob('app/build/test-results/**/*.xml', recursive=True):
+              root = ET.parse(path).getroot()
+              for case in root.iter('testcase'):
+                  for fail in list(case.iter('failure')) + list(case.iter('error')):
+                      cls = (case.get('classname') or '').split('.')[-1]
+                      msg = (fail.get('message') or '').replace('\n', ' ')[:200]
+                      print(f"::error::FAILED {cls}.{case.get('name')} -- {msg}")
+          EOF
+          fi
+          exit "$STATUS"
+
+      # 测试报告作为 artifact 上传：失败时可以直接下载 HTML 报告看完整堆栈，
+      # 比在日志里翻快得多。
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
