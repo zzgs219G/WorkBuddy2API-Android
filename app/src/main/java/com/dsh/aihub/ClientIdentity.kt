@@ -31,8 +31,20 @@ package com.dsh.aihub
  */
 object ClientIdentity {
 
-    /** 当前对接的官方 CLI 版本。上游 product.json 的 date 字段为 2026-09-11，对应 v2.150.0。 */
-    const val CLI_VERSION = "2.150.0"
+    /**
+     * 当前对接的官方 CLI 版本。
+     *
+     * 取值来源变更（2026-10-29）：原先取自官方 npm 包解包（@tencent-ai/codebuddy-code
+     * v2.150.0，product.json 的 date 为 2026-09-11）。但 npm 包发版频率低于客户端
+     * 实际推送频率，解包值会滞后。
+     *
+     * 现对齐 workbuddy2api-hub 的真机抓包实测值 2.168.2（官方包解包核对），
+     * 该值同时用于 UA 的两段与 X-IDE-Version / X-Product-Version。
+     *
+     * 为什么这事重要：上游只要启用「客户端版本需够新」的校验，旧版本号会直接
+     * 被判为非官方渠道。这类校验成本极低、最可能被开启，所以版本号要尽量跟新。
+     */
+    const val CLI_VERSION = "2.168.2"
 
     /** product.json 的 productName。 */
     const val PRODUCT_NAME = "CodeBuddy"
@@ -58,10 +70,9 @@ object ClientIdentity {
     /**
      * 官方 CLI 的真实 UA。
      *
-     * 对应 buildUserAgent 的 else 分支输出：`CodeBuddy/2.150.0 CLI/2.150.0`
-     * 注意顺序：算法最后一句是 platform 段 unshift 到数组头部，因此 CLI 在前。
-     * 实测证据（incident-report:52 记录的旧版本）为 `CLI/2.63.2 CodeBuddy/2.63.2`，
-     * 与本实现的结构逐字一致，仅版本号不同。
+     * 对应 buildUserAgent 的 else 分支输出：`CLI/2.168.2 CodeBuddy/2.168.2`
+     * （platform 段在前、applicationName/productName 段在后）。
+     * 实测证据：workbuddy2api-hub 解包官方包核对的两段均为 2.168.2。
      */
     val CLI_UA: String = "$PLATFORM/$CLI_VERSION $PRODUCT_NAME/$CLI_VERSION"
 

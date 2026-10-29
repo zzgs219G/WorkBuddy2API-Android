@@ -44,6 +44,27 @@ object FailureDiagnosis {
         /** 账号凭据失效（access/refresh token 过期或被吊销）。必须重新登录。 */
         SESSION_DEAD("session_dead", "登录已失效"),
 
+        /**
+         * 账号级风控限制（HTTP 403 / code 11140「账号存在异常行为，已被限制使用」）。
+         *
+         * 与 [SESSION_DEAD] 的区别很关键：这不是登录失效，重新登录没用；
+         * 也不是内容拦截，换提示词没用。
+         *
+         * workbuddy2api-hub 的实测记录：上游按小时到工作日计，官方工单口径是
+         * 「临时风控 1-3 个工作日自动解除」，期间**官方客户端同样报这个错**。
+         * 且明确警告「解封前严禁换号继续打同一设备」—— 换号只会把更多账号
+         * 一起送进风控。所以建议必须是"停手等"，而不是"换号"。
+         */
+        ACCOUNT_RESTRICTED("account_restricted", "账号被风控限制"),
+
+        /**
+         * 模型级不可用 / 该模型额度用满（6004 / 11134 / 11102 / 11150 / 11158）。
+         *
+         * 与 [HARD_CREDIT] 的区别：那是整个账号没钱，这里是**某个模型**不能用，
+         * 同账号的其它模型仍然正常。所以处置是"换模型"而不是"换账号"。
+         */
+        MODEL_LIMITED("model_limited", "该模型不可用或额度用满"),
+
         /** 上游拒绝请求体：多为角色/字段/内容校验。改请求或改提示词。 */
         CLIENT("client", "请求被上游拒绝"),
 
@@ -120,6 +141,44 @@ object FailureDiagnosis {
     private val CHANNEL_MARKERS = listOf(
         "11128", "unapproved channel", "illegal api invocation",
         "conversation id missing",
+        // 10-28 起上游把「A 句 + B 句连续出现」也归到同一判据，返回 code one-to-many。
+        // 它不是单词匹配，而是整段连续匹配（见 PromptRules 的说明）。
+        "one-to-many",
+    )
+
+    /**
+     * 账号被风控的措辞（HTTP 403 / code 11140）。
+     *
+     * 「账号存在异常行为，已被限制使用」是上游原文。与 11128 的区别在于：
+     * 11128 是"这个请求不像官方客户端发的"，11140 是"这个账号被盯上了"。
+     * 后者换提示词、换请求头都没用，只能等。
+     */
+    private val RESTRICTED_MARKERS = listOf(
+        "账号存在异常行为",
+        "已被限制使用",
+        "account restricted",
+    )
+
+    /** 11140 单独走按码匹配（避免命中 111400 之类更长的数字）。 */
+    private const val RESTRICTED_CODE = "11140"
+
+    /**
+     * 模型级不可用的 code。
+     *
+     * 依据 workbuddy2api-hub 的 MODEL_SCOPED_ERROR_CODES 与实测注释：
+     *   6004  usage exceeds frequency limit（该模型窗口额度用满）
+     *   11102 service info not found
+     *   11134 model provider temporarily unavailable
+     *   11150 reasoning effort unsupported
+     *   11158 model not available
+     * 共同点：**只影响这一个模型**，同账号其它模型仍可用。
+     */
+    private val MODEL_LIMITED_CODES = listOf("6004", "11102", "11134", "11150", "11158")
+
+    /** 6004 的措辞（有些响应体不带 code，只有文案）。 */
+    private val MODEL_LIMITED_MARKERS = listOf(
+        "usage exceeds frequency limit",
+        "model limit",
     )
 
     /** 从响应体里取可用于展示的上游原文。 */
@@ -153,6 +212,17 @@ object FailureDiagnosis {
         return markers.any { lowered.contains(it.lowercase()) }
     }
 
+    /**
+     * 匹配错误码。
+     *
+     * 不能直接用 [matches] 做裸子串包含：`6004` 会命中 `16004`、`160045` 这类
+     * 更长的数字，`11140` 也会命中 `111400`。所以要求数字两侧不是数字字符。
+     */
+    private fun matchesAnyCode(body: String, codes: List<String>): Boolean =
+        codes.any { code ->
+            Regex("(?<![0-9])$code(?![0-9])").containsMatchIn(body)
+        }
+
     // ---------------------------------------------------------------- //
     // 主入口
     // ---------------------------------------------------------------- //
@@ -169,10 +239,42 @@ object FailureDiagnosis {
         // 顺序有意：先看语义明确的措辞，再看状态码。
         // 因为同一状态码能表达不同含义（403 既可能是限流也可能是会话失效），
         // 只看状态码必然误判。
+        //
+        // 账号风控放在最前：它和 11128、限流都可能同为 403/400，
+        // 但处置方式唯一且相反（必须停手，换号有害），所以优先级最高。
+        if (matches(body, RESTRICTED_MARKERS) || matchesAnyCode(body, listOf(RESTRICTED_CODE))) {
+            return Diagnosis(
+                Kind.ACCOUNT_RESTRICTED,
+                "账号被上游风控限制（HTTP $status，11140）",
+                "立即停止使用这个账号，等待 1-3 个工作日自动解除。" +
+                    "期间**不要换号继续打同一台设备** —— 上游按设备关联，" +
+                    "换号只会把更多账号一起送进风控。官方客户端此刻同样报此错，" +
+                    "所以这不是配置或提示词问题，改任何设置都无效。",
+                text,
+            )
+        }
+        // 模型级限制放在额度判定之前：6004 的文案里也有 "frequency limit"，
+        // 但它是"这个模型"的窗口额度，与"整个账号没钱"处置完全不同。
+        //
+        // 判据分两种：带 code 的（6004/11102/11134/11150/11158）与只有文案的
+        // （usage exceeds frequency limit）。后者若同时命中额度措辞，说明是账号
+        // 真没钱，交给下面的 HARD_CREDIT 分支处理。
+        if (matchesAnyCode(body, MODEL_LIMITED_CODES) ||
+            (matches(body, MODEL_LIMITED_MARKERS) && !matches(body, CREDIT_MARKERS))
+        ) {
+            return Diagnosis(
+                Kind.MODEL_LIMITED,
+                "该模型的额度/频率已达上限（HTTP $status）",
+                "换用同账号的其它模型即可，账号本身没问题；" +
+                    "等模型窗口重置后该模型会自动恢复。不要因此换账号 —— " +
+                    "按账号冷却会把整个账号池拖黑。",
+                text,
+            )
+        }
         if (matches(body, CHANNEL_MARKERS)) {
             return Diagnosis(
                 Kind.CLIENT,
-                "上游拒绝了这个请求（HTTP $status，11128 渠道校验）",
+                "上游拒绝了这个请求（HTTP $status，渠道校验）",
                 "不是账号问题，换号无效。通常是上游收紧了客户端校验：先升级到最新版本，" +
                     "若已最新则等待作者适配。可到「出网取证」导出实际发出的请求头用于比对。",
                 text,

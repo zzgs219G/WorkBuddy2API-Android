@@ -200,6 +200,74 @@ class FailureDiagnosisTest {
     }
 
     // ---------------------------------------------------------------- //
+    // 账号风控 11140 / 模型级限制 6004（依据上游实测补充）
+    // ---------------------------------------------------------------- //
+
+    @Test
+    fun `11140 is account restriction, and must NOT suggest switching accounts`() {
+        // 上游实测：11140 按设备关联，换号只会把更多账号一起送进风控。
+        // 如果这里建议"换号"，用户照做就会连累其它账号 —— 这是最危险的一条错判。
+        val body = """{"code":11140,"msg":"账号存在异常行为，已被限制使用"}"""
+        val d = FailureDiagnosis.fromHttp(403, body)
+        assertEquals(FailureDiagnosis.Kind.ACCOUNT_RESTRICTED, d.kind)
+        assertTrue("应说明要等", d.action.contains("等待") || d.action.contains("停止"))
+        assertTrue("必须警告不要换号", d.action.contains("不要换号"))
+        assertFalse("不能建议重新登录", d.action.contains("重新登录"))
+    }
+
+    @Test
+    fun `11140 is recognised by code alone, without the chinese message`() {
+        val d = FailureDiagnosis.fromHttp(403, """{"code":11140}""")
+        assertEquals(FailureDiagnosis.Kind.ACCOUNT_RESTRICTED, d.kind)
+    }
+
+    @Test
+    fun `a longer number containing 11140 is not misread`() {
+        // 裸子串匹配会让 111400 命中断言，进错分支。
+        val d = FailureDiagnosis.fromHttp(400, """{"code":111400}""")
+        assertFalse(
+            "111400 被误判成 11140",
+            d.kind == FailureDiagnosis.Kind.ACCOUNT_RESTRICTED,
+        )
+    }
+
+    @Test
+    fun `6004 is model limited, and must NOT suggest switching accounts`() {
+        // 6004 只影响一个模型；按账号冷却会让一个撞限流的模型黑洞掉整个池。
+        val body = """{"code":6004,"msg":"usage exceeds frequency limit"}"""
+        val d = FailureDiagnosis.fromHttp(429, body)
+        assertEquals(FailureDiagnosis.Kind.MODEL_LIMITED, d.kind)
+        assertTrue("应建议换模型", d.action.contains("模型"))
+        assertTrue("必须警告不要换账号", d.action.contains("不要因此换账号"))
+    }
+
+    @Test
+    fun `model-scoped codes are all classified as model limited`() {
+        // 11102 服务信息缺失 / 11134 provider 暂不可用 / 11150 reasoning effort 不支持 / 11158 模型不可用
+        for (code in listOf(11102, 11134, 11150, 11158)) {
+            val d = FailureDiagnosis.fromHttp(400, """{"code":$code}""")
+            assertEquals("code $code 应归为模型级", FailureDiagnosis.Kind.MODEL_LIMITED, d.kind)
+        }
+    }
+
+    @Test
+    fun `genuine credit exhaustion is not misread as model limit`() {
+        // 两个分支的文案里都可能出现 frequency limit，只有"账号没钱"才是 HARD_CREDIT。
+        val body = """{"code":402,"msg":"insufficient credit, usage exceeds frequency limit"}"""
+        val d = FailureDiagnosis.fromHttp(402, body)
+        assertEquals(FailureDiagnosis.Kind.HARD_CREDIT, d.kind)
+    }
+
+    @Test
+    fun `one-to-many is treated as a channel rejection`() {
+        // 10-28 起上游把「A 句 + B 句连续出现」也返回 code one-to-many。
+        val body = """{"code":"one-to-many","msg":"request illegal"}"""
+        val d = FailureDiagnosis.fromHttp(400, body)
+        assertEquals(FailureDiagnosis.Kind.CLIENT, d.kind)
+        assertTrue(d.action.contains("换号无效"))
+    }
+
+    // ---------------------------------------------------------------- //
     // 入库格式
     // ---------------------------------------------------------------- //
 

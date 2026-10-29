@@ -321,6 +321,8 @@ private fun kindLabel(wire: String): String = when (wire) {
     "hard_credit" -> "额度不足"
     "soft_rate" -> "被限流"
     "session_dead" -> "登录失效"
+    "account_restricted" -> "账号被风控"
+    "model_limited" -> "模型不可用"
     "client" -> "请求被拒"
     "not_found" -> "接口不存在"
     "server" -> "上游异常"

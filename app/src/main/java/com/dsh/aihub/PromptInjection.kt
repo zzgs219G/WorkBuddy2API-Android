@@ -176,11 +176,17 @@ object PromptInjection {
      *
      * 顺序与 1.2.7 保持一致：先做模板句替换 → 再删 billing 头 → 再删 cc_ 键值。
      * 先替换后删除的原因：模板句里可能嵌着 billing 头，替换后整段更容易被正则一次吃干净。
+     *
+     * 第二道（身份句正则）在模板句之后：模板句是整句精确匹配，先把最确定的
+     * 那几句换掉，再让正则兜住变体（powered by / built by / created by …）。
      */
     fun sanitizeText(text: String): String {
         if (PromptRules.FINGERPRINT_MARKERS.none { text.contains(it) }) return text
         var out = text
         for ((from, to) in PromptRules.TEMPLATE_REPLACEMENTS) out = out.replace(from, to)
+        // 身份句变体兜底。放在固定串之后：固定串能精确命中的先换掉，
+        // 剩下的变体（上游随时可能新增动词）交给正则。
+        out = out.replace(PromptRules.RE_IDENTITY, PromptRules.IDENTITY_REPLACEMENT)
         if (PromptRules.RE_BILLING_HEADER.containsMatchIn(out)) out = out.replace(PromptRules.RE_BILLING_HEADER, "")
         if (out.contains("cc_", ignoreCase = true)) {
             // cc_ 键值可能连续出现，替换一次会漏（replace 只吃非重叠的首批），故循环到稳定。
