@@ -17,8 +17,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.dsh.aihub.ApiHostService
+import com.dsh.aihub.LanAddress
 import com.dsh.aihub.m3.SectionTitle
 
 /**
@@ -67,6 +70,20 @@ fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                         + "请确认 API Key 未泄漏再打开",
                     checked = app.settings.optString("lanAccess", "0") in setOf("1", "true"),
                     onChange = { app.saveSetting("lanAccess", if (it) "1" else "0") }
+                )
+                // Origin 严格校验的逃生口。
+                //
+                // 默认开启严格校验，用来挡住 DNS rebinding（恶意网页把域名解析到
+                // 127.0.0.1 从而"合法"调用本接口）。但少数 Electron 客户端
+                // （如 Cherry Studio 的内置网页面板）会用 file:// 或自身域名作为
+                // Origin，会被拒绝。给一个开关比让用户去改代码现实。
+                //
+                // 关闭后只跳过 Origin 检查，Host 仍然校验 —— rebinding 主要靠 Host 拦。
+                SwitchRow(
+                    title = "严格校验请求来源",
+                    summary = "推荐开启。挡住恶意网页盗用本地接口；若某个客户端报 403 forbidden_origin，可临时关闭",
+                    checked = app.settings.optString("relax_origin", "0") !in setOf("1", "true"),
+                    onChange = { app.saveSetting("relax_origin", if (it) "0" else "1") }
                 )
                 // 保活与取证都回答同一个问题：「服务为什么不通」。
                 // 前者查系统限制，后者查上游请求，排查时是连续动作。
@@ -145,9 +162,33 @@ fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                 PcInfoRow(
                     "监听地址",
                     if (app.settings.optString("lanAccess", "0") in setOf("1", "true"))
-                        "0.0.0.0:8788（本机与局域网）"
-                    else "127.0.0.1:8788（仅本机）"
+                        "0.0.0.0:${ApiHostService.PORT}（本机与局域网）"
+                    else "127.0.0.1:${ApiHostService.PORT}（仅本机）"
                 )
+                // 开了局域网访问才显示真实 IP。
+                //
+                // 为什么单列一行：上面的 "0.0.0.0" 是「监听所有网卡」的写法，
+                // 不是能连的地址。用户要把它填进电脑上的客户端时，必须知道手机的
+                // 实际局域网 IP —— 以前只能自己去系统设置里翻 WLAN 详情再手抄。
+                if (app.settings.optString("lanAccess", "0") in setOf("1", "true")) {
+                    val lan = remember { LanAddress.primary() }
+                    if (lan == null) {
+                        PcInfoRow("局域网地址", "未检测到可用的局域网网卡（请确认已连 WiFi）")
+                    } else {
+                        PcInfoRow("局域网地址", lan.address)
+                        PcInfoRow("客户端 baseUrl", LanAddress.baseUrl(ApiHostService.PORT, lan))
+                        PcActionGrid(
+                            actions = listOf(
+                                PcAction("复制局域网 baseUrl", primary = true) {
+                                    copyToClipboard(
+                                        context,
+                                        LanAddress.baseUrl(ApiHostService.PORT, lan),
+                                    )
+                                }
+                            )
+                        )
+                    }
+                }
                 // 更新入口放在「关于」而非独立 Tab：更新是低频操作，
                 // 占一个底部导航位会稀释主功能入口的权重。
                 // 用 PcRow（支持 onClick）而不是 PcInfoRow（纯展示）。

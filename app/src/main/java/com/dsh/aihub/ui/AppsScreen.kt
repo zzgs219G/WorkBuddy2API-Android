@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.dsh.aihub.AccountRegion
 import com.dsh.aihub.ApiHostService
 import com.dsh.aihub.FormatKit
+import com.dsh.aihub.LanAddress
 import com.dsh.aihub.m3.AppCard
 import com.dsh.aihub.m3.LabelMain
 import com.dsh.aihub.m3.LabelSummary
@@ -73,7 +74,23 @@ fun AppsScreen(context: Context, app: AppState) {
         item { SectionTitle(text = "接入配置") }
         item {
             PcCard {
-                PcInfoRow("Base URL", "http://127.0.0.1:${ApiHostService.PORT}/v1")
+                // 展示哪个地址取决于「是否允许局域网访问」：
+                //   · 只监听回环 → 127.0.0.1（只有本机 App 能连）
+                //   · 开了局域网 → 手机的实际 IP（电脑/平板才能连进来）
+                //
+                // 以前固定显示 127.0.0.1。开了局域网后用户照抄这个地址去电脑上填，
+                // 永远连不通 —— 因为 127.0.0.1 在电脑上指的是电脑自己。
+                val lanEnabled = app.settings.optString("lanAccess", "0") in setOf("1", "true")
+                val lan = remember(lanEnabled) { if (lanEnabled) LanAddress.primary() else null }
+                val baseUrl = LanAddress.baseUrl(ApiHostService.PORT, lan)
+                PcInfoRow("Base URL", baseUrl)
+                if (lanEnabled) {
+                    if (lan == null) {
+                        PcInfoRow("局域网", "已开启，但未检测到可用的局域网网卡")
+                    } else {
+                        PcInfoRow("局域网地址", "${lan.address}（${lan.interfaceName}）")
+                    }
+                }
                 PcInfoRow("认证请求头", "Authorization: Bearer <你的 Key>")
                 PcInfoRow("兼容请求头", "X-Api-Key: <你的 Key>")
                 Spacer(Modifier.height(PcTokens.SpaceM))
@@ -81,8 +98,8 @@ fun AppsScreen(context: Context, app: AppState) {
                     // M3 的 TextButton 没有 `text =` 参数（Miuix 有），文案改由尾随 lambda 承载。
                     TextButton(
                         onClick = {
-                            copyToClipboard(context, "http://127.0.0.1:${ApiHostService.PORT}/v1")
-                            app.showMessage("已复制 Base URL")
+                            copyToClipboard(context, baseUrl)
+                            app.showMessage("已复制 Base URL：$baseUrl")
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("复制地址") }

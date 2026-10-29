@@ -1052,6 +1052,9 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
             // 默认关闭是刻意选择：本机之外没有合法调用方（客户端就是手机上的其他 App），
             // 开放局域网只会把攻击面从本机进程扩大到整个 WiFi。
             "lanAccess" to "0",
+            // Origin 严格校验：默认开启（"0" = 不放宽）。
+            // 见 RequestGuard 与 ApiHostService.handle 的说明。
+            "relax_origin" to "0",
             // 更新通道："stable" = 只看正式版（默认），"beta" = 含预发布。
             // 默认稳定：预发布版本可能装不上或行为未验证，不该默认推给所有人。
             "updateChannel" to "stable"

@@ -13,11 +13,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.dsh.aihub.ApiHostService
 import com.dsh.aihub.FormatKit
+import com.dsh.aihub.LanAddress
 import com.dsh.aihub.m3.SectionTitle
 
 /**
@@ -68,9 +70,16 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                     )
                 }
                 Spacer(Modifier.height(PcTokens.SpaceS))
+                // 服务运行中展示「实际能连的地址」：开了局域网就是手机 IP，
+                // 否则是回环地址。固定写 127.0.0.1 会让用户在电脑上填了连不通。
+                val lanEnabled = app.settings.optString("lanAccess", "0") in setOf("1", "true")
+                val lanEntry = remember(lanEnabled) { if (lanEnabled) LanAddress.primary() else null }
+                val baseUrl = LanAddress.baseUrl(ApiHostService.PORT, lanEntry)
                 Text(
                     when {
-                        running -> "OpenAI 兼容地址  http://127.0.0.1:${ApiHostService.PORT}/v1"
+                        running && lanEntry != null ->
+                            "OpenAI 兼容地址  $baseUrl（局域网 · ${lanEntry.address}）"
+                        running -> "OpenAI 兼容地址  $baseUrl"
                         starting -> "正在校验账号并预热模型，通常数秒内完成；若长时间无变化，请检查通知权限。"
                         else -> "启动后仅在本机提供 OpenAI 兼容 API。"
                     },
@@ -92,8 +101,8 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                             primary = true
                         ) { app.toggleServer(activity) },
                         PcAction("复制地址") {
-                            copyToClipboard(context, "http://127.0.0.1:${ApiHostService.PORT}/v1")
-                            app.showMessage("已复制 Base URL")
+                            copyToClipboard(context, baseUrl)
+                            app.showMessage("已复制 Base URL：$baseUrl")
                         }
                     )
                 )

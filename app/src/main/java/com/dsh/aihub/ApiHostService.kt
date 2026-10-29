@@ -297,6 +297,32 @@ class ApiHostService : Service() {
         val bodyText = String(bodyBytes, StandardCharsets.UTF_8)
         val startedAt = System.currentTimeMillis()
 
+        // 入站可信性检查（Host / Origin）。
+        //
+        // 认证密钥挡不住 DNS rebinding：恶意网页可以让自己的域名解析到 127.0.0.1，
+        // 从而"合法地"带着 Origin 调用本接口。Host/Origin 是唯一不依赖密钥的判据。
+        // 具体判定规则与理由见 RequestGuard 的类注释。
+        //
+        // 放在鉴权之前：被拒绝的跨站请求不应该消耗一次密钥校验，
+        // 也不该被记成"用户 Key 配错"。
+        run {
+            // 严格模式（默认）：校验 Host 与 Origin。
+            // 可在设置里关闭 —— 某些 Electron 客户端（如 Cherry Studio 的内置
+            // 网页面板）会用 file:// 或自身域名作为 Origin，严格校验会拒绝它们。
+            // 关闭后只跳过 Origin 检查，Host 仍校验（rebinding 主要靠 Host 拦）。
+            val relaxed = NativeCore.settings(this).optString("relax_origin", "0") in setOf("1", "true")
+            val verdict = if (relaxed) {
+                RequestGuard.checkHost(headers["host"].orEmpty(), LanAddress.list().map { it.address })
+            } else {
+                RequestGuard.check(headers, LanAddress.list().map { it.address })
+            }
+            if (verdict is RequestGuard.Verdict.Deny) {
+                Log.w(TAG, "rejected ${method} ${path}: ${verdict.reason}")
+                json(output, 403, apiError(verdict.reason, "forbidden_origin"))
+                return
+            }
+        }
+
         val selectedApp = authorizedApp(headers)
         try {
             when {
@@ -685,15 +711,42 @@ class ApiHostService : Service() {
 
     private fun writeSseHeaders(output: OutputStream) {
         val text = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n" +
-            "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
+            "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\n" +
+            corsHeaders() + "\r\n"
         writeUtf8(output, text)
     }
 
     private fun writeHeaders(output: OutputStream, status: Int, contentType: String, length: Int) {
         val text = "HTTP/1.1 $status ${reason(status)}\r\nContent-Type: $contentType\r\nContent-Length: $length\r\n" +
-            "Connection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, X-Api-Key, Content-Type, Anthropic-Version\r\n" +
+            "Connection: close\r\n" + corsHeaders() +
+            "Access-Control-Allow-Headers: Authorization, X-Api-Key, Content-Type, Anthropic-Version\r\n" +
             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\r\n"
         writeUtf8(output, text)
+    }
+
+    /**
+     * CORS 响应头。
+     *
+     * 原来这里固定是 `Access-Control-Allow-Origin: *` —— 那等于告诉浏览器
+     * 「任何站点都可以读这个接口的响应」，与 RequestGuard 的 Origin 校验自相矛盾：
+     * 服务端拒绝了跨站请求，却又在头里声明允许跨站，两者只能有一个是真的。
+     *
+     * 现在只回显**同源**地址（回环或本机局域网 IP）；跨站请求已经在
+     * RequestGuard 里被 403 拒绝，走不到这里。
+     *
+     * 注意这不影响命令行/桌面客户端：它们不做 CORS 检查，读不读这个头都一样。
+     */
+    private fun corsHeaders(): String {
+        val lan = LanAddress.list()
+        // 回环永远允许：本机其它 App（含浏览器里的本地调试页）是主要调用方之一。
+        val allowed = buildList {
+            add("http://127.0.0.1:$PORT")
+            add("http://localhost:$PORT")
+            lan.forEach { add("http://${it.address}:$PORT") }
+        }
+        // 无 Origin 的请求不需要 CORS 头；给一个保守的单值即可，
+        // 避免把一整串地址塞进响应头。
+        return "Access-Control-Allow-Origin: ${allowed.first()}\r\n"
     }
 
     private fun writeUtf8(output: OutputStream, text: String) {
