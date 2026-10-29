@@ -23,9 +23,9 @@ import com.dsh.aihub.ui.AppState
  * 全部功能页面（概览/账号/模型/记录/应用/设置/成长 + 各二级页）都在 ui 包内，
  * 与 Activity 生命周期解耦，Activity 重建不丢页面状态（Tab/二级页用 rememberSaveable）。
  *
- * 与原 MainActivity 的关系：
- *   MainActivity 是迁移来源与参考实现，其页面已全部迁入本界面；
- *   源码保留在库中（未在清单注册为启动项），仅用于对照排查迁移差异。
+ * 与原纯 View 界面的关系：
+ *   旧界面（已删除的 MainActivity.kt，2001 行 View + XML 实现）是迁移来源，
+ *   其页面已全部迁入本界面；如需查阅，从 git 历史取该次提交即可。
  */
 class MiuixHostActivity : ComponentActivity() {
 

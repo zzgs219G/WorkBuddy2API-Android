@@ -1,0 +1,347 @@
+name: 云端打包 APK
+
+# ============================================================
+#  AIHub（WorkBuddy2API-Android）· 云端打包流水线
+#
+#  触发方式：
+#   ① 手动触发 —— Actions → 云端打包 APK → Run workflow
+#      可选「测试版(debug)」或「正式版(release)」，版本号框选填（如 200），
+#      版本名自动换算；全空也能直接构建（回退 gradle 里写的默认值）
+#   ② 打标签触发 —— git tag v2.0.0 && git push origin v2.0.0
+#
+#  产出（Artifact，在每次运行结果页面底部下载）：
+#   - AIHub-正式版-*.apk / AIHub-测试版-*.apk（含 checksums.txt）
+#   - 构建日志-*：完整 gradle 日志 + 测试报告 + R8 混淆映射
+#
+#  签名密钥（可选）：
+#   在 Settings → Secrets 配置 AIHUB_STORE_BASE64 / AIHUB_STORE_PASSWORD /
+#   AIHUB_KEY_ALIAS / AIHUB_KEY_PASSWORD。未配置时正式版退回 debug 签名，
+#   产物仅可用于本地验证（无法覆盖已安装的正式版）。
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 打包类型（正式版=签名发布版 / 测试版=调试版 / 全部=一次出两包）
+        required: true
+        type: choice
+        default: "测试版(debug)"
+        options:
+          - "测试版(debug)"
+          - "正式版(release)"
+          - "全部(both)"
+      version_code:
+        description: 版本号，选填，整数(如 200)或版本名(如 2.0.0)均可；留空=用 gradle.properties 里的默认值
+        required: false
+        type: string
+        default: ""
+      log_level:
+        description: 日志模式（快速=精简更快 / 详细=完整日志排查用）
+        required: true
+        type: choice
+        default: "快速模式"
+        options:
+          - "快速模式"
+          - "详细模式"
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: cloud-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 云端打包
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ---------- 计算版本号 ----------
+      # 版本号是唯一入口：填整数或点分版本名都能用，留空则回退 gradle 里的默认值。
+      # 标签触发(v*)时版本名优先取标签（v2.0.0 → 2.0.0）。
+      - name: 计算版本号
+        env:
+          MANUAL_CODE: ${{ inputs.version_code }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          # gradle 里写的默认值，作为"留空"时的兜底
+          DEFAULT_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          DEFAULT_CODE=$(grep -oP 'versionCode = \K[0-9]+' app/build.gradle.kts)
+          if [[ "$TAG_NAME" == v* ]]; then
+            VERSION_NAME="${TAG_NAME#v}"
+            VERSION_CODE="$MANUAL_CODE"
+            [ -n "$VERSION_CODE" ] || {
+              # 标签触发没填版本号时，从版本名反推（2.0.0 → 200）
+              MAJOR=$(echo "$VERSION_NAME" | cut -d. -f1)
+              MINOR=$(echo "$VERSION_NAME" | cut -d. -f2)
+              PATCH=$(echo "$VERSION_NAME" | cut -d. -f3)
+              VERSION_CODE=$((10#${MAJOR:-0} * 100 + 10#${MINOR:-0} * 10 + 10#${PATCH:-0}))
+            }
+          elif [ -n "$MANUAL_CODE" ]; then
+            if [[ "$MANUAL_CODE" =~ ^[0-9]+$ ]]; then
+              MAJOR=$((10#$MANUAL_CODE / 100))
+              MINOR=$(((10#$MANUAL_CODE % 100) / 10))
+              PATCH=$((10#$MANUAL_CODE % 10))
+              VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
+              VERSION_CODE="$MANUAL_CODE"
+            elif [[ "$MANUAL_CODE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              MAJOR=$(echo "$MANUAL_CODE" | cut -d. -f1)
+              MINOR=$(echo "$MANUAL_CODE" | cut -d. -f2)
+              PATCH=$(echo "$MANUAL_CODE" | cut -d. -f3)
+              VERSION_NAME="$MANUAL_CODE"
+              VERSION_CODE=$((10#$MAJOR * 100 + 10#$MINOR * 10 + 10#$PATCH))
+            else
+              echo "❌ 版本号需为整数（如 200）或版本名（如 2.0.0），收到：$MANUAL_CODE"
+              exit 1
+            fi
+          else
+            echo "⚠ 未填版本号，使用 gradle 默认值 ${DEFAULT_CODE}(${DEFAULT_NAME})"
+            VERSION_NAME="$DEFAULT_NAME"
+            VERSION_CODE="$DEFAULT_CODE"
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "✔ 版本名称=$VERSION_NAME  版本号=$VERSION_CODE"
+
+      # ---------- 确定打包类型 ----------
+      - name: 确定打包类型
+        run: |
+          BT="${{ inputs.build_type }}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BT="正式版(release)"
+          fi
+          if [ "$BT" = "正式版(release)" ]; then
+            echo "GRADLE_TASK=assembleRelease" >> "$GITHUB_ENV"
+            echo "PKG_TYPE=正式版" >> "$GITHUB_ENV"
+          elif [ "$BT" = "全部(both)" ]; then
+            echo "GRADLE_TASK=assembleDebug assembleRelease" >> "$GITHUB_ENV"
+            echo "PKG_TYPE=全部" >> "$GITHUB_ENV"
+          else
+            echo "GRADLE_TASK=assembleDebug" >> "$GITHUB_ENV"
+            echo "PKG_TYPE=测试版" >> "$GITHUB_ENV"
+          fi
+          echo "✔ 打包类型=$PKG_TYPE  任务=$GRADLE_TASK"
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # 本项目 compileOptions / jvmTarget 均为 17（见 app/build.gradle.kts）
+          java-version: 17
+
+      # ---------- 安装 SDK 平台 ----------
+      # 本项目 compileSdk = android-37.0，它位于 Google 的 preview channel，
+      # 不在稳定 channel，必须带 --channel=3 才会被 sdkmanager 找到。
+      - name: 安装 SDK Platform 37 与 Build Tools
+        run: |
+          set -e
+          # sdkmanager 的路径在不同 runner 镜像里不一样，逐个探测（与既有 build.yml 一致）
+          SDKM=""
+          for c in "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+                   "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager; do
+            [ -x "$c" ] && SDKM="$c" && break
+          done
+          if [ -z "$SDKM" ]; then
+            echo "::error::sdkmanager not found"
+            exit 1
+          fi
+          echo "✔ sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          # android-37.0 位于 Google 的 preview channel，必须带 --channel=3；
+          # 稳定 channel 只有 android-37（写法不同，两个都试一次）
+          "$SDKM" --channel=3 --install "platforms;android-37.0" \
+            || "$SDKM" --install "platforms;android-37" \
+            || { echo "::error::无法安装 android-37.0"; exit 1; }
+          "$SDKM" --install "build-tools;35.0.0" || true
+          echo "---- 已安装平台 ----"
+          ls "$ANDROID_HOME/platforms"
+
+      - name: 设置 Gradle 缓存（加速后续打包）
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          add-job-summary: on-failure
+
+      # ---------- 签名密钥 ----------
+      # app/build.gradle.kts 的 releaseSigning() 读的是环境变量：
+      #   AIHUB_STORE_FILE / AIHUB_STORE_PASSWORD / AIHUB_KEY_ALIAS / AIHUB_KEY_PASSWORD
+      # 这里把 Secret 里的 base64 keystore 落盘并导出这些变量。
+      # 未配置时 build.gradle 会自动退回 debug 签名（只警告，不失败）。
+      - name: 准备签名配置
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AIHUB_STORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.AIHUB_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.AIHUB_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.AIHUB_KEY_PASSWORD }}
+        run: |
+          set -e
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/aihub-release.jks"
+            {
+              echo "AIHUB_STORE_FILE=$RUNNER_TEMP/aihub-release.jks"
+              echo "AIHUB_STORE_PASSWORD=$STORE_PASSWORD"
+              echo "AIHUB_KEY_ALIAS=$KEY_ALIAS"
+              echo "AIHUB_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "✔ 已使用 GitHub Secrets 中的签名密钥"
+          else
+            echo "::warning::未配置 AIHUB_STORE_BASE64，正式版将退回 debug 签名，无法覆盖已安装的正式版"
+            echo "⚠ 未配置签名密钥 → 退回 debug 签名（仅限本地验证）"
+          fi
+
+      # ---------- 正式打包 ----------
+      - name: "🏗️ 执行打包：${{ env.GRADLE_TASK }}"
+        shell: bash
+        env:
+          APP_VERSION_NAME: ${{ env.VERSION_NAME }}
+          APP_VERSION_CODE: ${{ env.VERSION_CODE }}
+        run: |
+          mkdir -p build-log
+          echo "===== 开始打包：${GRADLE_TASK} | 版本 ${VERSION_NAME}(${VERSION_CODE}) ====="
+          set -o pipefail
+          if [ "${{ inputs.log_level }}" = "详细模式" ]; then
+            GRADLE_LOG_FLAGS="--info --warning-mode all"
+          else
+            GRADLE_LOG_FLAGS=""
+          fi
+          echo "📋 日志模式：${GRADLE_LOG_FLAGS:-快速（精简）}"
+          # 版本号走 -P 而不是环境变量：Gradle daemon 会固化启动时的环境变量，
+          # 之后 System.getenv 读到的是 daemon 的环境，注入会失效（实测过）。
+          # 全部(both) 时 GRADLE_TASK 含两个任务，不能加引号
+          # shellcheck disable=SC2086
+          ./gradlew ${GRADLE_TASK} \
+            -PappVersionCode="${VERSION_CODE}" \
+            -PappVersionName="${VERSION_NAME}" \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
+            --stacktrace --console=plain --build-cache ${GRADLE_LOG_FLAGS} \
+            2>&1 | tee build-log/gradle.log
+
+      # ---------- 校验版本号真的进了包 ----------
+      # 只打印日志不算验证：必须从 APK 里读回来核对，否则注入失效会静默通过。
+      - name: 🔍 校验产物版本号
+        if: success()
+        run: |
+          set -e
+          AAPT2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)
+          FAILED=0
+          for APK in app/build/outputs/apk/*/*.apk; do
+            [ -e "$APK" ] || continue
+            INFO=$("$AAPT2" dump badging "$APK" 2>/dev/null | head -1)
+            GOT_CODE=$(echo "$INFO" | grep -oP "versionCode='\K[0-9]+")
+            GOT_NAME=$(echo "$INFO" | grep -oP "versionName='\K[^']+")
+            echo "$APK → versionCode=$GOT_CODE versionName=$GOT_NAME（期望 $VERSION_CODE / $VERSION_NAME）"
+            # release 退回 debug 签名时也算通过，只校验版本
+            if [ "$GOT_CODE" != "$VERSION_CODE" ] || [ "$GOT_NAME" != "$VERSION_NAME" ]; then
+              echo "::error::$APK 版本号未按预期注入"
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" -eq 0 ] || exit 1
+          echo "✔ 版本号校验通过"
+
+      # ---------- 整理产物 ----------
+      - name: 📦 整理 APK 产物
+        if: success()
+        run: |
+          set -e
+          case "$GRADLE_TASK" in
+            assembleRelease) APK_DIRS="app/build/outputs/apk/release" ;;
+            "assembleDebug assembleRelease") APK_DIRS="app/build/outputs/apk/release app/build/outputs/apk/debug" ;;
+            *) APK_DIRS="app/build/outputs/apk/debug" ;;
+          esac
+          mkdir -p dist
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(date +%Y%m%d-%H%M)
+          COUNT=0
+          for APK_DIR in $APK_DIRS; do
+            case "$APK_DIR" in
+              *release*) TYPE="正式版" ;;
+              *) TYPE="测试版" ;;
+            esac
+            for f in "$APK_DIR"/*.apk; do
+              [ -e "$f" ] || continue
+              BASE="AIHub-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}"
+              cp "$f" "dist/${BASE}.apk"
+              echo "✔ 产物：dist/${BASE}.apk ($(du -h "$f" | cut -f1))"
+              COUNT=$((COUNT+1))
+            done
+          done
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::未生成 APK，请查看日志：$APK_DIRS"
+            exit 1
+          fi
+          sha256sum dist/*.apk > dist/checksums.txt
+          echo "---- 产物清单 ----"
+          ls -lh dist/
+
+      # ---------- 上传 APK ----------
+      - name: ⬆️ 上传 APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "AIHub-${{ env.PKG_TYPE }}-v${{ env.VERSION_NAME }}"
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      # ---------- 收集 daemon 日志 ----------
+      - name: 📋 收集 Gradle daemon 日志
+        if: always()
+        run: |
+          mkdir -p build-log/daemon
+          cp -f "$HOME"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true
+          ls -la build-log/daemon/ 2>/dev/null || true
+
+      # ---------- 上传完整构建日志 ----------
+      - name: ⬆️ 上传完整构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "构建日志-${{ env.PKG_TYPE }}-v${{ env.VERSION_NAME }}"
+          path: |
+            build-log/
+            app/build/reports/
+            app/build/outputs/mapping/
+            app/build/outputs/logs/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ---------- 失败时抓精简摘要 ----------
+      - name: 🐞 生成精简报错摘要（几 KB，直接给 AI / 排查用）
+        if: failure()
+        shell: bash
+        run: |
+          LOG="build-log/gradle.log"
+          SUM="build-log/error-summary.txt"
+          {
+            echo "========== AIHub 构建失败 · 精简摘要（完整日志见同目录 gradle.log） =========="
+            echo ""
+            echo "===== ① 失败的任务 ====="
+            grep -nE "> Task .*FAILED" "$LOG" 2>/dev/null | head -20 || true
+            echo ""
+            echo "===== ② Kotlin 编译错误 ====="
+            grep -nE "^e: " "$LOG" 2>/dev/null | head -60 || true
+            echo ""
+            echo "===== ③ 根因（What went wrong / Caused by）====="
+            grep -nA8 "What went wrong:" "$LOG" 2>/dev/null | head -50 || true
+            grep -nE "Caused by" "$LOG" 2>/dev/null | head -15 || true
+            echo ""
+            echo "===== ④ 依赖/资源解析失败 ====="
+            grep -nE "Could not resolve|Failed to resolve|Could not find|Unresolved reference|no matching|incompatible" "$LOG" 2>/dev/null | head -20 || true
+            echo ""
+            echo "===== ⑤ R8 / 混淆相关 ====="
+            grep -niE "R8|Missing class|proguard" "$LOG" 2>/dev/null | head -20 || true
+          } | tee "$SUM"
+          echo ""
+          echo "✅ 精简摘要：$SUM"
+          echo "   $(wc -l < "$SUM") 行 · $(du -h "$SUM" | cut -f1) —— 把这个文件给 AI 看即可"

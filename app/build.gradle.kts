@@ -93,8 +93,23 @@ android {
         targetSdk = 36
         // 版本号随功能变更递增：便于在设备上区分"是否装上的是新版"
         // （同 versionCode 覆盖安装后，界面上无从判断装的是哪一版）。
-        versionCode = 33
-        versionName = "1.9.1-beta.1"
+        //
+        // 云端打包（.github/workflows/build-apk.yml）通过 -P 传入版本号：
+        //   -PappVersionCode=200 -PappVersionName=2.0.0
+        //
+        // 为什么用 -P 而不是环境变量：Gradle daemon 会把【启动时】的环境变量
+        // 固化在进程里，之后用 System.getenv 读到的是 daemon 的环境而非本次
+        // 调用的环境 —— 实测传 APP_VERSION_CODE 后 versionCode 仍是默认 33。
+        // project property 每次调用都会传给 daemon，不会有这个问题。
+        //
+        // 环境变量仍作为兜底（CI 里若直接 export 也能生效，前提是无 daemon）。
+        // 两者都没有时回退默认值，本地 `./gradlew assembleDebug` 行为不变。
+        versionCode = (findProperty("appVersionCode") as String?)?.toIntOrNull()
+            ?: System.getenv("APP_VERSION_CODE")?.toIntOrNull()
+            ?: 33
+        versionName = (findProperty("appVersionName") as String?)?.takeIf { it.isNotBlank() }
+            ?: System.getenv("APP_VERSION_NAME")?.takeIf { it.isNotBlank() }
+            ?: "1.9.1-beta.1"
     }
 
     buildTypes {

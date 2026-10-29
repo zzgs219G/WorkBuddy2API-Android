@@ -29,8 +29,8 @@ import java.lang.ref.WeakReference
 /**
  * App 内置授权窗口：用 WebView 承载上游登录页，整个登录/授权流程留在应用内部，不再跳系统浏览器。
  *
- * 上游登录是"设备授权流"——用户在这个窗口里登录并确认授权，MainActivity 依旧轮询
- * /v2/plugin/auth/token 取 token；轮询命中后调用 [dismissIfOpen] 自动关窗并刷新账号列表，
+ * 上游登录是"设备授权流"——用户在这个窗口里登录并确认授权，宿主界面（AppShell 的账号页）
+ * 依旧轮询 /v2/plugin/auth/token 取 token；轮询命中后调用 [dismissIfOpen] 自动关窗并刷新账号列表，
  * 因此这里不需要拦截回调 URL。
  */
 class OAuthWebActivity : Activity() {
@@ -80,7 +80,7 @@ class OAuthWebActivity : Activity() {
          */
         var onClosed: (() -> Unit)? = null
 
-        /** 轮询到授权成功后由 MainActivity 调用，自动关闭内置登录窗口。 */
+        /** 轮询到授权成功后由宿主界面调用，自动关闭内置登录窗口。 */
         fun dismissIfOpen() {
             current?.get()?.finish()
         }
@@ -351,8 +351,8 @@ class OAuthWebActivity : Activity() {
     override fun onDestroy() {
         if (current?.get() === this) current = null
         // 通知宿主结束本轮授权等待（成功自动关窗时宿主已自行清空，不会误取消）。
-        // 走通用回调而不是直接调 MainActivity：登录窗口是通用组件，
-        // 宿主可能是 Miuix 界面也可能仍是旧界面，硬编码任一方都会在另一方被移除后编译失败。
+        // 走通用回调而不是直接调用某个界面类：登录窗口是通用组件，
+        // 硬编码具体宿主会在该宿主被移除后编译失败。
         onClosed?.invoke()
         webView?.let { web ->
             // 关窗前清掉本次授权产生的磁盘缓存：登录页资源（JS/图片/字体）体量可观，

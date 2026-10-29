@@ -24,7 +24,8 @@ import org.json.JSONObject
  * 界面状态与后端调用的唯一持有者 —— 所有页面都从这里取数据、发动作。
  *
  * 设计要点（与原纯 View 实现的关系）：
- *   原 MainActivity 用「render(page) 全量重建视图 + io 线程池 + main.post 回主线程」的模式。
+ *   原纯 View 实现（已删除的 MainActivity）用「render(page) 全量重建视图 + io 线程池 +
+ *   main.post 回主线程」的模式。
  *   Compose 下等价物是「mutableStateOf 驱动重组」，因此这里把原先散在 Activity 里的
  *   数据缓存（accounts / modelCache / creditCache / checkinResults / events）集中成状态字段，
  *   业务调用仍然走 [NativeCore]，一行都没重写。

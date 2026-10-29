@@ -725,7 +725,12 @@ class ApiHostService : Service() {
     }
 
     private fun notification(text: String): Notification {
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        // 指向清单里真正注册的启动页。
+        //
+        // 原来指向 MainActivity，但它已从 AndroidManifest 移除（第 51-53 行注释），
+        // 系统解析不到该组件 —— 点击常驻通知不会有任何反应（部分 ROM 直接抛
+        // ActivityNotFoundException）。服务通知是用户回到界面的主要入口，必须可达。
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MiuixHostActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 1, Intent(this, ApiHostService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
@@ -764,7 +769,7 @@ class ApiHostService : Service() {
             } else if (existing.importance == NotificationManager.IMPORTANCE_NONE) {
                 // 渠道被关闭 = 前台服务通知不可见，系统可能据此弱化甚至清理服务，
                 // 这正是"通知权限明明开了却还是被杀"的常见原因。不擅自改回用户设置，
-                // 只记录日志，由界面侧引导用户重新打开（见 MainActivity 的保活自检）。
+                // 只记录日志，由界面侧引导用户重新打开（见 ui/KeepAliveScreen）。
                 Log.w(TAG, "notification channel disabled by user; foreground service may be deprioritized")
             }
         }

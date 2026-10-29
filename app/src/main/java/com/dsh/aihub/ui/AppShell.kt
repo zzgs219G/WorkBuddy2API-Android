@@ -1,39 +1,34 @@
 package com.dsh.aihub.ui
 
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.animation.togetherWith
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.fadeIn
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.runtime.remember
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.background
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.Alignment
-import androidx.compose.material3.Surface
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Column
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
-import android.content.Context
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -42,8 +37,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.activity.compose.BackHandler
+import android.content.Context
 import com.dsh.aihub.m3.AppM3Theme
 import com.dsh.aihub.m3.M3Icons
 import com.dsh.aihub.UpdateScreen
@@ -149,115 +151,94 @@ fun AppShell(context: Context, app: AppState) {
                     // 账号页的「刷新全部账号额度」），顶栏再挂全局刷新属冗余。
                 )
             },
-            bottomBar = {
-                if (sub == SubPage.NONE) {
-                    // 不用 M3 的 NavigationBarItem：它把每个 item 撑成
-                    // 「屏宽/6 + 固定 80dp 高」，纯文字 Tab 会被拉开一大片空白。
-                    //
-                    // 1081dp 有效宽度下每格约 180dp，而一个两字标签只需
-                    // 约 60dp —— 宽松感主要来自这里，不是 padding。
-                    //
-                    // 改为 Row + 等分 weight，自行控制高度与内边距。
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceContainer)
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        AppTab.entries.forEach { item ->
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null,
-                                    ) { tab = item },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                TabContent(item, selected = tab == item)
+            // bottomBar 不放在 Scaffold 的 bottomBar 槽位里。
+            //
+            // 原因：Scaffold 的 bottomBar 一旦出现/消失，content 的 padding 会在
+            // 同一帧突变成不同的值，AnimatedContent 内部正在做位移的子项会跟着
+            // 跳一下 —— 这正是「切换动画乱跳」的一半来源。
+            //
+            // 改成放进 content 的 Column 里，顶栏 padding 恒定，只有页面区高度变化，
+            // 且底栏自身的显隐用 AnimatedVisibility 过渡。
+        ) { padding ->
+            // 页面切换加过渡动画。
+            //
+            // 方向判定只依赖 AnimatedContent 自己给的 initialState / targetState，
+            // 不用任何外部变量记录「上一个 Tab」。
+            //
+            // 原来写的是
+            //     val forward = tabIndex >= prevTabIndex
+            //     LaunchedEffect(tabIndex) { prevTabIndex = tabIndex }
+            // 但 LaunchedEffect 在组合提交之后才执行，而 transitionSpec 在整个
+            // 动画期间会被反复求值 —— 那时 prevTabIndex 已被改写成当前值，
+            // 于是 forward 恒为 true：不论左右切换都朝同一方向滑。
+            // 这就是「切换动画乱跳」的直接原因。
+            val pageKey = if (sub != SubPage.NONE) "sub:${'$'}{sub.name}" else "tab:${'$'}{tab.name}"
+
+            Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+                AnimatedContent(
+                    targetState = pageKey,
+                    transitionSpec = {
+                        val fromSub = initialState.startsWith("sub:")
+                        val toSub = targetState.startsWith("sub:")
+                        // 两页同为 tab 时按枚举序定方向；进出二级页按层级定方向：
+                        // 进去算前进（新页从右入），返回算后退（旧页从右出）。
+                        val forward = when {
+                            !fromSub && !toSub ->
+                                AppTab.valueOf(targetState.removePrefix("tab:")).ordinal >=
+                                    AppTab.valueOf(initialState.removePrefix("tab:")).ordinal
+                            fromSub && toSub -> true
+                            else -> toSub
+                        }
+                        val dir = if (forward) 1 else -1
+                        // 位移取 1/5 屏宽：整屏滑动在动画期间会把内容拉成模糊条带，
+                        // 1/5 既有方向感又保持内容可辨。
+                        val enter = slideInHorizontally { dir * it / 5 } + fadeIn()
+                        val exit = slideOutHorizontally { -dir * it / 5 } + fadeOut()
+                        (enter togetherWith exit).apply {
+                            targetContentZIndex = if (forward) 1f else -1f
+                        }
+                    },
+                    // 高度用 weight 占满剩余空间，底栏不再由 Scaffold 的 bottomBar
+                    // 槽位提供，从而避免底栏显隐时 content padding 同帧突变。
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    label = "page",
+                ) { k ->
+                    Box(Modifier.fillMaxSize()) {
+                        if (k.startsWith("sub:")) {
+                            val page = SubPage.valueOf(k.removePrefix("sub:"))
+                            when (page) {
+                                SubPage.USAGE -> UsageScreen(context, app)
+                                SubPage.INSPECTOR -> InspectorScreen(context, app)
+                                SubPage.STORAGE -> StorageScreen(context, app)
+                                SubPage.KEEPALIVE -> KeepAliveScreen(context, app)
+                                SubPage.QODER -> QoderScreen()
+                                SubPage.PROMPT -> PromptScreen(context)
+                                SubPage.RECORDS -> RecordsScreen(context, app)
+                                SubPage.SCHEDULE -> ScheduleScreen(context, app)
+                                SubPage.UPDATE -> UpdateScreen(context, app)
+                                SubPage.ABOUT -> AboutScreen(context) { sub = SubPage.UPDATE }
+                                SubPage.NONE -> Unit
+                            }
+                        } else {
+                            val page = AppTab.valueOf(k.removePrefix("tab:"))
+                            when (page) {
+                                AppTab.OVERVIEW -> OverviewScreen(context, app) { sub = it }
+                                AppTab.ACCOUNTS -> AccountsScreen(context, app)
+                                AppTab.MODELS -> ModelsScreen(context, app)
+                                AppTab.APPS -> AppsScreen(context, app)
+                                AppTab.SETTINGS -> SettingsScreen(context, app) { sub = it }
+                                AppTab.GROWTH -> GrowthScreen(context, app.selectedAccount)
                             }
                         }
                     }
                 }
-            }
-        ) { padding ->
-            // 页面切换加过渡动画。
-            //
-            // 两个维度分开处理，因为语义不同：
-            //   · Tab 之间切换 —— 同级水平切换。用「位移 + 淡入淡出」，
-            //     方向由 Tab 索引差决定：往右切就内容往左滑，反之亦然。
-            //   · 进入二级页 —— 层级加深。统一从右侧推入，返回时反向。
-            //
-            // 位移取屏宽的 1/5（不是整屏）：整屏滑动的动画时间会把
-            // 内容拉伸成模糊条带，1/5 既有方向感又保持内容可辨。
-            //
-            // 用 AnimatedContent 而不是 Crossfade：Crossfade 只有透明度，
-            // 快速连点 Tab 时看不出方向，用户会觉得"页面闪了一下"。
-            val tabIndex = AppTab.entries.indexOf(tab)
-            val prevTabIndex = remember { mutableIntStateOf(tabIndex) }
-            val forward = tabIndex >= prevTabIndex.intValue
-            LaunchedEffect(tabIndex) { prevTabIndex.intValue = tabIndex }
 
-            AnimatedContent(
-                targetState = if (sub != SubPage.NONE) "sub:${sub.name}" else "tab:${tab.name}",
-                transitionSpec = {
-                    val isSubEnter = targetState.startsWith("sub:")
-                    val isSubExit = initialState.startsWith("sub:")
-
-                    when {
-                        // 进二级页 / 出二级页：横向推入推出
-                        isSubEnter && !isSubExit -> {
-                            (slideInHorizontally { it / 5 } + fadeIn()) togetherWith
-                                (slideOutHorizontally { -it / 5 } + fadeOut())
-                        }
-                        isSubExit && !isSubEnter -> {
-                            (slideInHorizontally { -it / 5 } + fadeIn()) togetherWith
-                                (slideOutHorizontally { it / 5 } + fadeOut())
-                        }
-                        // Tab 之间：按索引方向滑
-                        else -> {
-                            val dir = if (forward) 1 else -1
-                            (slideInHorizontally { dir * it / 5 } + fadeIn()) togetherWith
-                                (slideOutHorizontally { -dir * it / 5 } + fadeOut())
-                        }
-                    }.apply {
-                        targetContentZIndex = if (isSubEnter || forward) 1f else -1f
-                    }
-                },
-                // 必须应用 Scaffold 给的 padding，否则内容会顶到屏幕最上沿，
-                // 被 CenterAlignedTopAppBar 盖住 —— 表现为「顶部文字被遮挡」。
-                // v1.3.0 引入 AnimatedContent 时漏了这一行。
-                modifier = Modifier.fillMaxSize().padding(padding),
-                label = "page",
-            ) { key ->
-                Box(Modifier.fillMaxSize()) {
-                    if (key.startsWith("sub:")) {
-                        val page = SubPage.valueOf(key.removePrefix("sub:"))
-                        when (page) {
-                            SubPage.USAGE -> UsageScreen(context, app)
-                            SubPage.INSPECTOR -> InspectorScreen(context, app)
-                            SubPage.STORAGE -> StorageScreen(context, app)
-                            SubPage.KEEPALIVE -> KeepAliveScreen(context, app)
-                            SubPage.QODER -> QoderScreen()
-                            SubPage.PROMPT -> PromptScreen(context)
-                            SubPage.RECORDS -> RecordsScreen(context, app)
-                            SubPage.SCHEDULE -> ScheduleScreen(context, app)
-                            SubPage.UPDATE -> UpdateScreen(context, app)
-                            SubPage.ABOUT -> AboutScreen(context) { sub = SubPage.UPDATE }
-                            SubPage.NONE -> Unit
-                        }
-                    } else {
-                        val page = AppTab.valueOf(key.removePrefix("tab:"))
-                        when (page) {
-                            AppTab.OVERVIEW -> OverviewScreen(context, app) { sub = it }
-                            AppTab.ACCOUNTS -> AccountsScreen(context, app)
-                            AppTab.MODELS -> ModelsScreen(context, app)
-                            AppTab.APPS -> AppsScreen(context, app)
-                            AppTab.SETTINGS -> SettingsScreen(context, app) { sub = it }
-                            AppTab.GROWTH -> GrowthScreen(context, app.selectedAccount)
-                        }
-                    }
+                AnimatedVisibility(
+                    visible = sub == SubPage.NONE,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut(),
+                ) {
+                    BottomBar(selected = tab, onSelect = { tab = it })
                 }
             }
         }
@@ -265,42 +246,67 @@ fun AppShell(context: Context, app: AppState) {
 }
 
 /**
- * 底部栏单个 Tab 的视觉。
+ * 底部导航栏。
  *
- * 选中态用整体 Surface 承载标签，选中时整块高亮。
- * （M3 的 NavigationBarItem 只圈图标，文字会落在背景块外面。）
+ * 三处尺寸/反馈上的修正：
  *
- * 为什么是纯文字、没有图标：
- *   内联 ImageVector 在 release 包里始终画不出来。R8 裁剪、
- *   addPathNodes 解析、keep 规则都排查过 —— pathData 字符串确实
- *   进了 dex（7/7 存活），但 ImageVector 仍然不渲染。
- *   与其在这条「字符串 pathData → ImageVector」的路上继续耗时，
- *   不如直接用文字：6 个两字标签本身足够区分，也少一层依赖。
+ *  1) **补 [navigationBarsPadding]**。本应用 targetSdk = 36，Android 15 起对该档
+ *     强制 edge-to-edge，窗口一直画到导航条/手势条底下。原先底栏没有任何 inset
+ *     处理，于是整体贴在屏幕最下沿、压在系统手势区上 —— 就是「底栏这么低」。
+ *  2) **每项最小高度 48dp**（Material 触摸目标下限）。原先 labelLarge 约 18dp
+ *     字高，加上下各 7dp 与外层 6dp，合计约 44dp，还只有文字没有图标，又矮又空。
+ *  3) **恢复 ripple**（去掉 indication = null）。原先点下去没有任何视觉反馈，
+ *     点起来像没生效。
  */
 @Composable
-private fun TabContent(tab: AppTab, selected: Boolean) {
-    val fg = if (selected) {
-        MaterialTheme.colorScheme.onSecondaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        shape = RoundedCornerShape(16.dp),
-    ) {
-        Text(
-            text = tab.label,
-            // labelLarge（14sp）：没有图标之后文字要自己撑住 Tab，
-            // labelSmall 会显得单薄。6 个两字标签在 14sp 下仍放得下。
-            style = MaterialTheme.typography.labelLarge,
-            color = fg,
-            maxLines = 1,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            // 纯文字 Tab 若只有字高，点击区会太窄，这里补足触摸高度。
-            // 横向 16dp 足够容纳两字标签；纵向 7dp 让整体高度落在
-            // 36dp 左右（14sp 字高 ~18dp + 14dp padding），
-            // 比 M3 默认的 80dp 矮一半，视觉上紧凑得多。
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp),
-        )
+private fun BottomBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppTab.entries.forEach { item ->
+                val isSelected = selected == item
+                val tint = if (isSelected) {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp))
+                        // selectable 而不是 clickable：自带 role = Tab 与 selected
+                        // 语义，无障碍服务能正确朗读「已选中」。
+                        .selectable(
+                            selected = isSelected,
+                            role = Role.Tab,
+                            onClick = { onSelect(item) },
+                        )
+                        .heightIn(min = 48.dp)
+                        .padding(vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        imageVector = item.icon,
+                        contentDescription = null, // 下方文字已表达含义，重复朗读反而吵
+                        modifier = Modifier.size(22.dp),
+                        tint = tint,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = item.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = tint,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
     }
 }

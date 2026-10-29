@@ -26,14 +26,14 @@ import com.dsh.aihub.AccountRegion
 import com.dsh.aihub.m3.SectionTitle
 
 /**
- * 模型页 —— 对应原界面 modelsPage()（MainActivity.modelCard）。
+ * 模型页 —— 对应原纯 View 界面的 modelsPage()（已删除的 MainActivity.modelCard）。
  *
  * 关键修正（原实现遗漏导致国内版与国际版模型混在一起）：
  *   每个模型自带 `regions` 数组（`refreshAllModels` 会按账号所属版本注入，
  *   同一 id 在两边都存在时会合并成 ["domestic","international"]），
  *   因此必须按版本分组展示，并显示该模型可用的版本标签。
  *
- * 字段契约（与 MainActivity.modelCard 完全对齐，不臆造字段名）：
+ * 字段契约（与原 modelCard 完全对齐，不臆造字段名）：
  *   id / name / regions[] / supports_tools / supports_images / context_length / credits
  *   credits 为成本倍率：<=0 视为免费，缺失则不显示该行。
  */
@@ -217,7 +217,7 @@ private fun ModelCard(model: org.json.JSONObject) {
     }
 }
 
-/** 与 MainActivity.formatTokens 保持同一写法（口径一致，避免同一数字两种显示）。 */
+/** 与原 formatTokens 保持同一写法（口径一致，避免同一数字两种显示）。 */
 private fun compactTokens(value: Long): String = when {
     value >= 1_000_000 -> "%.1fM".format(value / 1_000_000.0)
     value >= 1_000 -> "${value / 1_000}K"
