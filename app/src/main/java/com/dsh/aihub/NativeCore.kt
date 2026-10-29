@@ -112,7 +112,15 @@ object NativeCore {
         require(account.auth.optString("accessToken").isNotBlank() && account.uid.isNotBlank()) {
             "auth 文件缺少 accessToken 或 account.uid"
         }
-        store(context).upsertAccount(root, inferred.id)
+        val key = store(context).upsertAccount(root, inferred.id)
+        // 回填导出时附带的本地配置。
+        //
+        // 只在字段确实存在时写，避免「导入一个不带 local 的旧文件」把已有备注清空。
+        root.optJSONObject("local")?.let { local ->
+            if (local.has("remark")) store(context).setAccountRemark(key, local.optString("remark"))
+            if (local.has("priority")) store(context).setAccountPriority(key, local.optInt("priority"))
+            if (local.has("enabled")) store(context).setAccountEnabled(key, local.optBoolean("enabled", true))
+        }
         context.getSharedPreferences("native", Context.MODE_PRIVATE).edit().remove("account").apply()
         return account
     }
@@ -147,6 +155,23 @@ object NativeCore {
         val region = accountKey.substringBefore(':', "")
         val root = store(context).getAccountRoot(accountKey) ?: return null
         if (region.isNotBlank() && !root.has("region")) root.put("region", region)
+        // 附带本地配置。
+        //
+        // 原先导出的是纯 auth_json，本地设置（备注、优先级、启用状态）全部丢失，
+        // 换机迁移后所有账号又变回无名的短 UID、优先级归零 —— 用户得重新配一遍。
+        //
+        // 放在单独的 local 对象里而不是平铺到 root：root 是上游 auth 文件的原样
+        // 结构，往里塞自定义键会污染它（某些导入方会做严格字段校验）。
+        val meta = store(context).getAccount(accountKey)
+        if (meta != null) {
+            root.put(
+                "local",
+                JSONObject()
+                    .put("remark", meta.optString("remark"))
+                    .put("priority", meta.optInt("priority"))
+                    .put("enabled", meta.optBoolean("enabled", true))
+            )
+        }
         return root.toString(2)
     }
 
@@ -168,6 +193,10 @@ object NativeCore {
 
     fun setAccountEnabled(context: Context, accountKey: String, enabled: Boolean): Boolean = store(context).setAccountEnabled(accountKey, enabled)
     fun setAccountPriority(context: Context, accountKey: String, priority: Int): Boolean = store(context).setAccountPriority(accountKey, priority)
+
+    /** 设置用户自定义备注（与上游返回的 nickname 分开存储，重登不会覆盖）。 */
+    fun setAccountRemark(context: Context, accountKey: String, remark: String): Boolean =
+        store(context).setAccountRemark(accountKey, remark)
     fun deleteAccount(context: Context, accountKey: String): Boolean = store(context).deleteAccount(accountKey)
     fun selectAccount(context: Context): JSONObject? = store(context).selectAccount()
 
@@ -805,6 +834,12 @@ object NativeCore {
             .put("remain", remain).put("total", total)
     }
 
+    /** 全池今日收支（见 NativeStore.creditFlowToday）。 */
+    fun creditFlowToday(context: Context): JSONObject = store(context).creditFlowToday()
+
+    /** 各账号运行态快照（见 NativeStore.accountHealth）。 */
+    fun accountHealth(context: Context): JSONArray = store(context).accountHealth()
+
     fun refreshAllCredits(context: Context): JSONObject {
         val accounts = listAccounts(context)
         if (accounts.length() == 0) throw IOException("尚未导入 WorkBuddy 账号")
@@ -860,11 +895,27 @@ object NativeCore {
             // 每个包的到期时刻单独算，一起存进 packages —— 界面要按包展示
             // 「这笔还剩多少、哪天作废」，只有一个总额度的最早到期日不够用。
             val pkgExpire = expirySecondsOf(a, System.currentTimeMillis() / 1000.0)
+            // 统一的包 schema。
+            //
+            // 原先直接把上游原始对象整份塞进来（JSONObject(a.toString())），
+            // 于是界面拿到的是 CycleCapacitySize / CapacityRemain / ProductCode
+            // 这类上游字段名，各处只能靠猜。现在显式投影成稳定字段：
+            //   remaining / total / expire_at   —— 界面唯一依赖的三个
+            //   label                          —— 可读名称，取不到就给 code
+            //   is_cycle                       —— 是否周期额度（决定展示措辞）
+            // 原始对象仍保留在 raw 里，需要排查上游字段变化时可查。
             packages.put(
-                JSONObject(a.toString())
+                JSONObject()
                     .put("remaining", r)
                     .put("total", t)
                     .put("expire_at", pkgExpire ?: JSONObject.NULL)
+                    .put("is_cycle", cycle > 0)
+                    .put("label", a.optString("PackageName").ifBlank {
+                        a.optString("ProductName").ifBlank {
+                            a.optString("ProductCode").ifBlank { if (cycle > 0) "周期额度" else "总额度" }
+                        }
+                    })
+                    .put("raw", JSONObject(a.toString()))
             )
             // 账号级的「最早到期」只统计还有余量的包：
             // 一个已用尽的包即使更早到期，也不该影响选号时的临期判定。

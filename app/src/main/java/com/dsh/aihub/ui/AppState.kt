@@ -51,6 +51,12 @@ class AppState(private val context: Context) {
     var accounts by mutableStateOf<JSONArray>(JSONArray()); private set
     var models by mutableStateOf<JSONArray?>(null); private set
     var credits by mutableStateOf<JSONObject?>(null); private set
+
+    /** 今日收支（gain / loss / net / by_kind）。null 表示还没加载。 */
+    var creditFlow by mutableStateOf<JSONObject?>(null); private set
+
+    /** 各账号运行态快照（失败次数 / 冷却剩余 / 闲置时长）。 */
+    var accountHealth by mutableStateOf<JSONArray>(JSONArray()); private set
     var checkinResults by mutableStateOf<JSONArray?>(null); private set
     var usageSummary by mutableStateOf<JSONObject?>(null); private set
     var usageRecords by mutableStateOf<JSONArray>(JSONArray()); private set
@@ -191,9 +197,16 @@ class AppState(private val context: Context) {
         scope.launch {
             val list = runCatching { NativeCore.listAccounts(context) }.getOrDefault(JSONArray())
             val summary = runCatching { NativeCore.creditsSummary(context) }.getOrNull()
+            // 收支与健康快照和账号列表同一个查询周期：
+            // 它们都是由「账号/账本发生变化」触发的，分开加载会出现
+            // 「账号已更新但健康面板还是旧的」这种半新半旧状态。
+            val flow = runCatching { NativeCore.creditFlowToday(context) }.getOrNull()
+            val health = runCatching { NativeCore.accountHealth(context) }.getOrNull() ?: JSONArray()
             withContext(Dispatchers.Main) {
                 accounts = list
                 credits = summary
+                creditFlow = flow
+                accountHealth = health
                 // JSONArray 不是 Collection，需手工遍历（它没有 none / firstOrNull）。
                 val parsed = (0 until list.length()).mapNotNull { list.optJSONObject(it) }
                 val current = selectedAccount
@@ -349,6 +362,13 @@ class AppState(private val context: Context) {
         NativeCore.setAccountEnabled(context, accountKey, enabled)
         loadAccounts()
         if (enabled) "已启用" else "已停用"
+    }
+
+    fun setAccountRemark(accountKey: String, remark: String) = task("设置备注") {
+        if (NativeCore.setAccountRemark(context, accountKey, remark)) {
+            loadAccounts()
+            if (remark.isBlank()) "已清除备注" else "备注已设为「$remark」"
+        } else "设置失败：账号已不存在"
     }
 
     fun setAccountPriority(accountKey: String, priority: Int) = task("设置优先级") {

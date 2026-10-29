@@ -46,6 +46,14 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
         createSchema(db)
         ensureColumn(db, "accounts", "last_checkin_date", "TEXT")
         ensureColumn(db, "accounts", "credit_packages_json", "TEXT NOT NULL DEFAULT '[]'")
+        // v10：用户自定义备注。
+        //
+        // 为什么需要：nickname 是**上游返回的**显示名（profile.nickname），
+        // 不是用户自己的备注。同一上游账号在不同环境可能同名，或上游压根不给名字，
+        // 于是账号卡上只能显示「8f3a2b1c」这种短 UID —— 多账号时无法区分谁是谁。
+        // remark 由用户自己填，与 nickname 分开存储、互不覆盖：
+        // 界面优先显示 remark，没有才回退 nickname，再回退短 UID。
+        ensureColumn(db, "accounts", "remark", "TEXT NOT NULL DEFAULT ''")
         ensureColumn(db, "apps", "key_enc", "TEXT NOT NULL DEFAULT ''")
         ensureColumn(db, "apps", "region", "TEXT NOT NULL DEFAULT 'domestic'")
         ensureColumn(db, "apps", "updated_at", "REAL NOT NULL DEFAULT 0")
@@ -86,6 +94,7 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
             uid TEXT NOT NULL, region TEXT NOT NULL DEFAULT 'domestic',
             nickname TEXT NOT NULL DEFAULT '', enterprise_id TEXT NOT NULL DEFAULT '',
             domain TEXT NOT NULL DEFAULT '', auth_json TEXT NOT NULL,
+            remark TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
             credits_remaining REAL, credits_total REAL, credits_expire_at REAL,
             credit_packages_json TEXT NOT NULL DEFAULT '[]', last_used_at REAL NOT NULL DEFAULT 0,
@@ -230,6 +239,22 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
     fun setAccountPriority(accountKey: String, priority: Int): Boolean = updateAccount(accountKey, ContentValues().apply {
         put("priority", priority.coerceIn(MIN_PRIORITY, MAX_PRIORITY)); put("updated_at", nowSeconds())
     })
+
+    /**
+     * 设置用户自定义备注。
+     *
+     * 与 nickname 的区别（重要）：nickname 是上游返回的显示名，会在每次
+     * 登录/刷新账号时被覆盖；remark 是用户自己填的本地字段，upsertAccount
+     * 的 ContentValues 里不含它，所以重新登录不会冲掉。
+     *
+     * 传空串表示清除备注 —— 界面会自动回退到 nickname。
+     */
+    fun setAccountRemark(accountKey: String, remark: String): Boolean = updateAccount(accountKey, ContentValues().apply {
+        put("remark", remark.trim().take(MAX_REMARK_LEN)); put("updated_at", nowSeconds())
+    })
+
+    /** 备注长度上限。太长会撑破账号卡的第二行，也没有实际用途。 */
+    private val MAX_REMARK_LEN = 24
 
     fun clearAccountCooldown(accountKey: String): Boolean = updateAccount(accountKey, ContentValues().apply {
         put("failure_count", 0); put("cooldown_until", 0); put("updated_at", nowSeconds())
@@ -456,6 +481,98 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
             .put("kinds", kinds)
     }
 
+    /**
+     * 全池今日收支汇总（跨所有账号）。
+     *
+     * 为什么需要：此前"今天花了多少积分"只能在单个账号的积分详情里看到，
+     * 想知道全局得逐个账号点开 —— 而这是用户打开 App 最想知道的第二件事
+     * （第一件是"还剩多少"）。数据一直在 credit_ledger 里（ApiHostService
+     * 每次调用都写 kind="consume" 的负数），只是从没聚合出来展示。
+     *
+     * @return {today_gain, today_loss, net, by_kind:{kind:{gain,loss,count}}}
+     */
+    fun creditFlowToday(): JSONObject = run {
+        val todayStart = todayStartSeconds()
+        var gain = 0.0
+        var loss = 0.0
+        val byKind = JSONObject()
+        readableDatabase.rawQuery(
+            """SELECT kind,
+                      SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS g,
+                      SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) AS l,
+                      COUNT(*) AS n
+               FROM credit_ledger WHERE ts>=?
+               GROUP BY kind ORDER BY l DESC, g DESC""",
+            arrayOf(todayStart.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                val kind = c.getString(0)
+                val g = c.getDouble(1)
+                val l = c.getDouble(2)
+                byKind.put(kind, JSONObject().put("gain", g).put("loss", l).put("count", c.getInt(3)))
+                gain += g
+                loss += l
+            }
+        }
+        JSONObject()
+            .put("today_gain", gain)
+            .put("today_loss", loss)
+            .put("net", gain - loss)
+            .put("by_kind", byKind)
+    }
+
+    /**
+     * 每个账号的运行态快照，供「账号健康」面板使用。
+     *
+     * 这些字段一直在 accounts 表里，但界面一个都没引用过：
+     *   failure_count  连续失败次数 —— 解释"为什么它一直在冷却"
+     *   cooldown_until 冷却截止时刻 —— 可以算成"还剩几分钟"
+     *   last_used_at   上次被选中的时刻 —— 可以算成"多久没用过"
+     *
+     * 没有这些，用户看到的只是「冷却中」三个字，无法判断是刚被限流
+     * 还是卡了半小时。
+     */
+    fun accountHealth(): JSONArray = run {
+        val now = nowSeconds()
+        val out = JSONArray()
+        val names = HashMap<String, String>()
+        listAccounts().let { all ->
+            for (i in 0 until all.length()) {
+                val a = all.optJSONObject(i) ?: continue
+                names[a.optString("account_key")] = a.optString("nickname").ifBlank {
+                    a.optString("uid").take(8)
+                }
+            }
+        }
+        readableDatabase.rawQuery(
+            """SELECT account_key, enabled, failure_count, cooldown_until, last_used_at,
+                      credits_remaining, credits_expire_at
+               FROM accounts ORDER BY priority DESC, id ASC""",
+            null
+        ).use { c ->
+            while (c.moveToNext()) {
+                val key = c.getString(0)
+                val cooldownUntil = c.getDouble(3)
+                val lastUsed = c.getDouble(4)
+                out.put(
+                    JSONObject()
+                        .put("account_key", key)
+                        .put("label", names[key] ?: key.substringAfter(':').take(8))
+                        .put("enabled", c.getInt(1) != 0)
+                        .put("failure_count", c.getInt(2))
+                        // 负数表示已经过了冷却时间；界面只在 >0 时显示倒计时
+                        .put("cooldown_left", (cooldownUntil - now).coerceAtLeast(0.0))
+                        // 0 表示从未用过
+                        .put("idle_for", if (lastUsed <= 0) -1.0 else (now - lastUsed).coerceAtLeast(0.0))
+                        .put("credits_remaining", if (c.isNull(5)) JSONObject.NULL else c.getDouble(5))
+                        .put("credits_expire_at", if (c.isNull(6)) JSONObject.NULL else c.getDouble(6))
+                )
+            }
+        }
+        out
+    }
+
+    /** 本地时区的今日 0 点（秒）。用本地时区而非 UTC：用户说的"今天"是手机上的今天。 */
     /** 本地时区的今日 0 点（秒）。用本地时区而非 UTC：用户说的"今天"是手机上的今天。 */
     private fun todayStartSeconds(): Long {
         val cal = java.util.Calendar.getInstance()
@@ -478,6 +595,18 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
 
     /** 无健康账号时的兜底门槛：冷却还需等待超过该秒数则不硬打，由上层转 503。 */
     private val COOLDOWN_FALLBACK_MAX_WAIT = 30.0
+
+    /**
+     * 临期窗口（天）：积分在此天数内到期的账号会被加权优先派分。
+     *
+     * 取 7 与 workbuddy2api-hub 的默认值一致（它的 LIMIT_DEFAULTS 里也是 7，
+     * 但那边可配置）。这里保留常量而不做成设置项，是因为当前没有「按账号
+     * 单独设置」的 UI；等真有需求再加，避免先做一个没人调的开关。
+     *
+     * 设成 0 会让临期偏好完全失效 —— 那是旧实现（硬切）遇到过的状态，
+     * 所以这里用常量而非可写配置，避免误设成 0 静默失效。
+     */
+    private val EXPIRING_WINDOW_DAYS = 7.0
 
     /** 账号级最小间隔（秒）：对齐上游 ratelimit.py 默认 1.5s。 */
     private val RATELIMIT_MIN_INTERVAL = 1.5
@@ -502,7 +631,7 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
         if (pool.isEmpty()) {
             // 冷却兜底：无健康账号时退回「最早冷却到期」的账号顶班，但它若还要冷却
             // 超过 30s 就绝不硬打——打上去只会再吃一个 429，形成限流风暴。
-            // 上游实测事故记录见 CODE_REVIEW_TODO.md:195（单账号场景 fallback 反复选中同一账号）。
+            // 单账号场景下 fallback 会反复选中同一账号，这是实测事故。
             readableDatabase.rawQuery("SELECT * FROM accounts WHERE enabled=1$regionClause ORDER BY cooldown_until ASC LIMIT 1", regionArgs).use { c ->
                 if (c.moveToFirst()) {
                     val fallback = accountJson(c)
@@ -518,8 +647,15 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
             // 故改为「选不带间隔的号」，全部被节流时交回上层 503 明确拒绝。
             val throttled = pool.filter { accountReadyForSend(it, now) }
             if (throttled.isNotEmpty()) pool = throttled.toMutableList()
-            val urgent = pool.filter { !it.isNull("credits_expire_at") && it.optDouble("credits_expire_at") - now <= 7 * 86400 }
-            if (urgent.isNotEmpty()) pool = urgent.toMutableList()
+            // 这里原先有一次「7 天内到期就硬切」：
+            //     val urgent = pool.filter { ... <= 7*86400 }
+            //     if (urgent.isNotEmpty()) pool = urgent
+            // 它和 accountWeight 里的 expiry 阶梯因子重复，等于把临期偏好放大
+            // 两轮；更严重的是硬切会把窗口内所有号顶替掉池子里其它号 ——
+            // 一个明天到期的号会独占全部请求直到被限流，这正是要把突发摊开的
+            // 反面。workbuddy2api-hub 的经验是先硬切后改成加权轮询，注释里写明：
+            // 「严格最早优先会把所有请求压在那一个号上，直到被上游限流」。
+            // 现在只保留 accountWeight 里的连续加权，不再硬切。
         }
         if (pool.isEmpty()) return@synchronized null
         val weights = pool.map { accountWeight(it, now) }
@@ -660,8 +796,21 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
         val priority = 1.0 + max(0, a.optInt("priority"))
         val total = a.optDouble("credits_total", 0.0)
         val fullness = if (total > 0) 0.5 + 0.5 * (a.optDouble("credits_remaining", 0.0) / total).coerceIn(0.0, 1.0) else 1.0
-        val days = if (a.isNull("credits_expire_at")) Double.POSITIVE_INFINITY else (a.optDouble("credits_expire_at") - now) / 86400.0
-        val expiry = when { days <= 1 -> 8.0; days <= 3 -> 6.0; days <= 7 -> 4.0; days <= 30 -> 2.0; else -> 1.0 }
+        // 临期权重改成连续函数，替换原来的 4 档阶梯（<=1天 8x / <=3天 6x /
+        // <=7天 4x / <=30天 2x）。阶梯的问题是两个相邻档之间落差过大：
+        // 剩 7 天是 4 倍，剩 8 天就掉到 2 倍，行为像开关而不像偏好。
+        //
+        // 新公式与 workbuddy2api-hub 的 _expiry_weight 同构：
+        //     weight = max(1, window - days + 1)
+        // 意思是「离到期越近，分到的流量越多，但窗口边缘的号也有 1 份保底」。
+        // 取 max(1, ...) 是关键：没有保底的话，窗口内最远的号会被完全饿死。
+        //
+        // days 为 null（上游没给到期日、或哨兵值已判为不过期）时不参与偏好，
+        // 保持 1.0 —— 不能把「不知道」当成「马上要过期」。
+        val days = if (a.isNull("credits_expire_at")) null
+        else (a.optDouble("credits_expire_at") - now) / 86400.0
+        val expiry = if (days == null || days >= EXPIRING_WINDOW_DAYS) 1.0
+        else max(1.0, EXPIRING_WINDOW_DAYS - days + 1.0)
         val success = 1.0 / (1.0 + a.optInt("failure_count"))
         val last = a.optDouble("last_used_at", 0.0)
         val idle = if (last <= 0) 1.0 else (1.0 + (now - last).coerceAtLeast(0.0) / 3600.0 * 0.3).coerceAtMost(3.0)
@@ -1052,7 +1201,7 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
          * 进而执行 createSchema 里的 CREATE TABLE IF NOT EXISTS 把新表补上。
          * v9：新增 credit_ledger（积分账本，用于区分签到/奖励/消耗）。
          */
-        private const val DATABASE_VERSION = 10
+        private const val DATABASE_VERSION = 11
         private const val KEY_ALIAS = "workbuddy_native_app_keys"
         /** 优先级下限：0 = 不额外加权（选号权重 = 1.0）。 */
         const val MIN_PRIORITY = 0

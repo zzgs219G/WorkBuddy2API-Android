@@ -1,11 +1,24 @@
 package com.dsh.aihub.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -51,6 +64,16 @@ fun PcConfirmDialog(
     message: String,
     confirmText: String = "确定",
     dismissText: String = "取消",
+    /**
+     * 危险操作：确认按钮变为「长按 1.5 秒才生效」，且文案提示这一点。
+     *
+     * 用于删除账号这类不可逆动作。理由：普通确认框的确认与取消两个按钮
+     * 相邻、都是同样大小的文字按钮，手指从取消滑到确认几乎无感 ——
+     * 之前把删除按钮从卡片上挪进菜单、又加分隔线，解决的是「不要显眼」，
+     * 但真正的误触点在这个对话框里。长按是这类动作的通用解
+     * （GitHub 删仓库、支付宝删除账户都是这么做的）。
+     */
+    danger: Boolean = false,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -64,15 +87,76 @@ fun PcConfirmDialog(
                     Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState())
                 ) {
                     Text(message, style = MaterialTheme.typography.bodyLarge)
+                    if (danger) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "确认需要长按「$confirmText」约 1.5 秒 —— 这样误触不会生效。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             },
             confirmButton = {
-                TextButton(onClick = onConfirm) { Text(confirmText) }
+                if (danger) LongPressConfirmButton(confirmText, onConfirm)
+                else TextButton(onClick = onConfirm) { Text(confirmText) }
             },
             dismissButton = {
                 TextButton(onClick = onDismiss) { Text(dismissText) }
             }
         )
+    }
+}
+
+/**
+ * 长按 1.5 秒才触发的确认按钮，带进度反馈。
+ *
+ * 为什么需要进度反馈：只要求长按而不给视觉响应时，用户会以为按钮坏了，
+ * 反复点或反复长按 —— 反而更容易在某个瞬间凑巧触发。
+ * 这里按住时进度条从左到右填满，松手立即归零。
+ */
+@Composable
+private fun LongPressConfirmButton(text: String, onConfirm: () -> Unit) {
+    val progress = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    Box(contentAlignment = Alignment.Center) {
+        // 进度条作为背景，宽度随按住时长增长
+        Box(
+            Modifier
+                .matchParentSize()
+                .padding(horizontal = 4.dp, vertical = 8.dp)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(progress.value)
+                    .background(
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                        RoundedCornerShape(6.dp)
+                    )
+            )
+        }
+        TextButton(
+            onClick = { /* 点击不生效：必须长按 */ },
+            modifier = Modifier.pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        val job = scope.launch {
+                            progress.animateTo(1f, tween(1500, easing = LinearEasing))
+                            // 动画跑完 = 按住够久 → 触发并复位
+                            progress.snapTo(0f)
+                            onConfirm()
+                        }
+                        tryAwaitRelease()
+                        // 提前松手：取消
+                        job.cancel()
+                        scope.launch { progress.snapTo(0f) }
+                    }
+                )
+            }
+        ) {
+            Text(text, color = MaterialTheme.colorScheme.error)
+        }
     }
 }
 

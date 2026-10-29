@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -400,24 +401,57 @@ private fun AccountCard(
     val isInternational = AccountRegion.from(account.optString("region")) == AccountRegion.INTERNATIONAL
     val checkedIn = isCheckedInToday(account.optString("last_checkin_date"))
     var menuOpen by remember { mutableStateOf(false) }
+    var showRemark by remember { mutableStateOf(false) }
 
     PcCard(insideMargin = PaddingValues(horizontal = PcTokens.SpaceL, vertical = PcTokens.SpaceS)) {
         Column {
-            // ── 第一行：昵称 + 状态 ──
+            // ── 第一行：昵称（备注） + 状态 ──
+            //
+            // 备注与昵称在同一行用括号呈现，不额外占高度。
+            // nickname 是上游返回的显示名，同环境下的两个号可能同名、
+            // 或者上游压根不给名字（只剩短 UID），多账号时无法区分谁是谁。
+            // remark 是用户自己填的，显示时追加在昵称后面。
+            val remark = account.optString("remark").trim()
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text(
-                    nickname,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                Row(
                     modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                )
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Text(
+                        nickname,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (remark.isNotEmpty()) {
+                        // 备注用较淡的色与较小字号：它是辅助信息，
+                        // 不该和账号名抢注意力。
+                        Text(
+                            "（$remark）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                // 冷却状态带剩余时间。
+                //
+                // cooldown_until 这个字段一直在表里，但界面从没引用过（审计结果：
+                // 界面引用 0 处）。于是「冷却中」三个字无法区分「刚被限流，
+                // 还剩 10 秒」和「卡了半小时还没恢复」—— 后者才需要用户干预。
+                val cooldownLeft = if (account.isNull("cooldown_until")) 0.0
+                else (account.optDouble("cooldown_until", 0.0) - System.currentTimeMillis() / 1000.0)
+                    .coerceAtLeast(0.0)
                 Text(
                     when {
                         !enabled -> "已停用"
+                        cooldownLeft > 0 -> "冷却 ${cooldownLabel(cooldownLeft)}"
                         healthy -> "● 健康"
-                        else -> "冷却中"
+                        // 不健康但不在冷却：多半是额度为 0，直接说清楚
+                        else -> "额度耗尽"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = when {
@@ -467,21 +501,29 @@ private fun AccountCard(
                     )
                     add(account.optString("region_label", "国内版"))
                     // 临期提示：账号级 credits_expire_at 是「还有余量的包里最早的那个」。
-                    // 7 天内到期的号会被选号逻辑优先使用（NativeStore.selectAccount 的
-                    // urgent 分支），把这件事显示出来，用户才知道"为什么总是这个号"。
+                    // 7 天内到期的号会在选号权重里被抬高（accountWeight 的 expiry 因子），
+                    // 把这件事实显示出来，用户才知道"为什么总是这个号"。
                     val expireAt = if (account.isNull("credits_expire_at")) null
                     else account.optDouble("credits_expire_at", 0.0)
                     if (expireAt != null) {
                         val days = ((expireAt - System.currentTimeMillis() / 1000.0) / 86400.0).toInt()
                         if (days in 0..7) add("⚠ ${days}天后到期")
                     }
-                    // 优先级必须露出来：它直接决定选号顺序（权重 ×(n+1)），
-                    // 是"为什么总是这个号在被用"的唯一解释。收进菜单会让人
-                    // 找不到原因 —— 之前压缩卡片时我把它藏起来了，是错的。
-                    add("优先级 ${account.optInt("priority")}")
-                    add("UID ${FormatKit.shortUid(uid)}")
                 }.joinToString("  ·  "),
                 style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+            // ── 第二行后半：优先级与 UID 单独一行 ──
+            //
+            // 之前把所有字段挤进一行（额度+签到+地区+优先级+UID），
+            // 五个字段必然溢出被省略号截掉，用户看到的是「UID 8f3a…」这种
+            // 残缺值。拆成两行后每一行都完整可读，总高度只增加一行小字。
+            Text(
+                "优先级 ${account.optInt("priority")}（权重 ×${account.optInt("priority") + 1}）" +
+                    "　·　UID ${FormatKit.shortUid(uid)}",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
@@ -499,6 +541,10 @@ private fun AccountCard(
                             onClick = { menuOpen = false; app.setAccountEnabled(accountKey, !enabled) }
                         )
                         DropdownMenuItem(
+                            text = { Text("设置备注") },
+                            onClick = { menuOpen = false; showRemark = true }
+                        )
+                        DropdownMenuItem(
                             text = { Text("设置优先级") },
                             onClick = { menuOpen = false; showPriority = true }
                         )
@@ -509,27 +555,41 @@ private fun AccountCard(
                         // 「删除账号」刻意不放在这个菜单里。
                         //
                         // 菜单是「停用/优先级/导出」这类可逆或低风险动作的集合，
-                        // 删除是不可逆的。混在一起会有两个问题：
-                        //   ① 误触：菜单项之间只隔一行，手指滑一下就可能点到
-                        //   ② 语义混乱：删号不该看起来和"导出"是同一类操作
-                        // 现在它单独放在卡片底部，与上方内容用分隔线隔开。
+                        // 删除放在菜单最末，且与上面几项之间加一条分隔线 ——
+                        // 这是「危险动作与安全动作」的常规分隔方式（系统设置里普遍如此）。
+                        //
+                        // 为什么不做成「卡片底部独占一行」：那是上一版的做法，
+                        // 为了一个低频、不可逆、且必须防误触的动作，白白占掉一整行
+                        // 高度，把好不容易压下来的卡片密度又推回去了。防误触靠的是
+                        // 「点不到 + 二次确认」，不是「放在显眼位置」——
+                        // 危险操作越显眼，误触概率越大。
+                        HorizontalDivider(color = MaterialTheme.colorScheme.error.copy(alpha = 0.3f))
+                        DropdownMenuItem(
+                            text = { Text("删除账号", color = MaterialTheme.colorScheme.error) },
+                            onClick = { menuOpen = false; showDelete = true }
+                        )
                     }
                 }
             }
-            // ── 删除：独立区域 + 分隔线 + 明显的水平间距 ──
-            //
-            // 三重隔离都是为了防误触：
-            //   ① 分隔线把「可逆操作区」和「不可逆操作区」在视觉上切开
-            //   ② 上下各留 SpaceS，手指从上方滑下来不会直接落在它身上
-            //   ③ 靠左对齐且不用主题色填充（只是文字色为 error），
-            //      不做成醒目的实心按钮 —— 危险操作不该是视觉焦点
-            Spacer(Modifier.height(PcTokens.SpaceS))
-            PcDivider()
-            Spacer(Modifier.height(PcTokens.SpaceS / 2))
-            TextButton(onClick = { showDelete = true }) {
-                Text("删除账号", color = MaterialTheme.colorScheme.error)
-            }
         }
+    }
+
+    if (showRemark) {
+        // PcInputDialog 是受控组件（value + onValueChange），
+        // 所以用局部 state 承载输入，确认时一次性写库。
+        var remarkDraft by remember { mutableStateOf(account.optString("remark")) }
+        PcInputDialog(
+            show = true,
+            title = "设置备注",
+            label = "备注（只在本机显示，用于区分多个账号）",
+            value = remarkDraft,
+            onValueChange = { if (it.length <= 24) remarkDraft = it },
+            onConfirm = {
+                app.setAccountRemark(accountKey, remarkDraft)
+                showRemark = false
+            },
+            onDismiss = { showRemark = false }
+        )
     }
 
     if (showPriority) {
@@ -549,6 +609,8 @@ private fun AccountCard(
         title = "删除账号？",
         message = "${account.optString("region_label")} · $uid\n\n删除后该账号的登录凭证将从本机移除，无法恢复。",
         confirmText = "删除",
+        // 不可逆操作：确认按钮改为长按 1.5 秒才生效。
+        danger = true,
         onConfirm = { app.deleteAccount(accountKey, nickname); showDelete = false },
         onDismiss = { showDelete = false }
     )
@@ -644,4 +706,16 @@ private fun pollOAuth(activity: Activity, session: com.dsh.aihub.OAuthSession, a
             }
         }.start()
     }, 2000)
+}
+
+/**
+ * 冷却剩余时间的可读形式。
+ *
+ * 只显示一位有效单位：10 秒 / 5 分钟 / 2 小时。
+ * 精确到秒对用户没有意义，反而每秒都在变、更焦虑。
+ */
+private fun cooldownLabel(seconds: Double): String = when {
+    seconds < 60 -> "${seconds.toInt()} 秒"
+    seconds < 3600 -> "${(seconds / 60).toInt()} 分钟"
+    else -> "${(seconds / 3600).toInt()} 小时"
 }

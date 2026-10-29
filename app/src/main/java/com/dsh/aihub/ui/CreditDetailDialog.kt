@@ -181,9 +181,11 @@ private fun PackagesSection(detail: JSONObject) {
     for (p in sorted) {
         val remain = p.optDouble("remaining", 0.0)
         val totalP = p.optDouble("total", 0.0)
-        val kind = when {
-            p.optDouble("CycleCapacitySize", 0.0) > 0 -> "周期额度"
-            else -> "总额度"
+        // 统一 schema：kind 由 NativeCore 投影好的 is_cycle 决定，
+        // 不再在界面侧读上游字段名（CycleCapacitySize）—— 那正是之前
+        // 到期时间读不到、字段名靠猜的同一类问题。
+        val kind = p.optString("label").ifBlank {
+            if (p.optBoolean("is_cycle", false)) "周期额度" else "总额度"
         }
         // expire_at 由 NativeCore.expirySecondsOf 算好：已处理 DeductionEndTime
         // 优先、哨兵值（>730 天视为不过期）过滤、秒/毫秒单位归一。
