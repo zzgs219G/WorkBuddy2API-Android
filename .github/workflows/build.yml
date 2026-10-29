@@ -69,11 +69,24 @@ jobs:
           ./gradlew :app:compileDebugKotlin :app:compileReleaseKotlin --stacktrace --console=plain 2>&1 | tee compile.log
           STATUS=${PIPESTATUS[0]}
           if [ "$STATUS" -ne 0 ]; then
-            # 只挑 Kotlin 编译错误行（e: 开头）发成 annotation，最多 20 条
-            grep -E "^e: " compile.log | head -20 | while IFS= read -r line; do
-              # 去掉 file:// 前缀并把 %XX 解成可读字符，否则 annotation 里没法看
-              echo "::error::$(printf '%b' "${line//%/\\x}")"
-            done
+            # 把 Kotlin 编译错误发成 annotation（不登录也能在 Actions 页面读到）。
+            #
+            # 这里只用 python3 做 URL 解码，不自己拼 printf 转义：
+            # 之前写过 `printf '%b' "${line//%/\x}"`，它会把行里所有的 % 都
+            # 替换成 \x，遇到正常文本里的百分号就变成乱码甚至被解释成控制字符。
+            # urllib.parse.unquote 只解有效的 %XX，其余原样保留。
+            python3 - <<'EOF'
+          import re, urllib.parse
+          with open('compile.log', encoding='utf-8', errors='replace') as handle:
+              for line in handle:
+                  if not line.startswith('e: '):
+                      continue
+                  # 去掉 file:// 前缀并用 basename 缩短：路径里有中文目录，
+                  # URL 编码后极长，annotation 里只看文件名更有用。
+                  text = urllib.parse.unquote(line.rstrip())
+                  text = re.sub(r'file://\S*/([^/]+):', r'\1:', text)
+                  print(f"::error::{text[:300]}")
+          EOF
           fi
           exit "$STATUS"
 

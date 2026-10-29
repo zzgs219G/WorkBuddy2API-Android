@@ -308,12 +308,22 @@ fun PcMetricRow(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Top
     ) {
-        items.forEachIndexed { index, (label, value) ->
+        items.forEachIndexed { index, item ->
+            val label = item.first
+            val value = item.second
             val clickable = index == clickableIndex && onClick != null
+            // 可点时先接住回调，避免在 lambda 里对 nullable 用 !!
+            val tap: (() -> Unit)? = if (clickable) onClick else null
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .then(if (clickable) Modifier.clip(RoundedCornerShape(8.dp)).clickable { onClick!!() } else Modifier)
+                    .then(
+                        if (tap != null) {
+                            Modifier.clip(RoundedCornerShape(8.dp)).clickable { tap() }
+                        } else {
+                            Modifier
+                        }
+                    )
                     .padding(vertical = 2.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
