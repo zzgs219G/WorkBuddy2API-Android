@@ -93,6 +93,18 @@ enum class AppTab(val label: String, val icon: ImageVector) {
 /** 二级页面（覆盖在 Tab 之上，带返回按钮）。 */
 enum class SubPage { NONE, USAGE, INSPECTOR, STORAGE, KEEPALIVE, PROMPT, RECORDS, SCHEDULE, UPDATE, ABOUT, QODER }
 
+/**
+ * 当前显示的页面标识。
+ *
+ * 用密封类而不是 `"tab:XXX"` / `"sub:YYY"` 字符串：字符串方案需要
+ * 拼装 + `valueOf` 回解析，一旦格式有偏差就在运行时抛异常（曾因此闪退），
+ * 且编译器无法检查；密封类的 `when` 是穷尽的，漏分支直接编译失败。
+ */
+private sealed class PageKey {
+    data class Tab(val tab: AppTab) : PageKey()
+    data class Sub(val page: SubPage) : PageKey()
+}
+
 /** 二级页标题映射，避免在 TopAppBar 里写 when 分支。 */
 private fun SubPage.title(): String = when (this) {
     SubPage.USAGE -> "用量"
@@ -162,32 +174,42 @@ fun AppShell(context: Context, app: AppState) {
         ) { padding ->
             // 页面切换加过渡动画。
             //
-            // 方向判定只依赖 AnimatedContent 自己给的 initialState / targetState，
-            // 不用任何外部变量记录「上一个 Tab」。
+            // 页面标识用带类型的数据类，不用字符串拼接 + valueOf 回解析。
             //
-            // 原来写的是
-            //     val forward = tabIndex >= prevTabIndex
-            //     LaunchedEffect(tabIndex) { prevTabIndex = tabIndex }
-            // 但 LaunchedEffect 在组合提交之后才执行，而 transitionSpec 在整个
-            // 动画期间会被反复求值 —— 那时 prevTabIndex 已被改写成当前值，
-            // 于是 forward 恒为 true：不论左右切换都朝同一方向滑。
-            // 这就是「切换动画乱跳」的直接原因。
-            val pageKey = if (sub != SubPage.NONE) "sub:${'$'}{sub.name}" else "tab:${'$'}{tab.name}"
+            // 这里踩过两次坑，都记下来避免重犯：
+            //
+            // ① 方向判定曾用
+            //        val forward = tabIndex >= prevTabIndex
+            //        LaunchedEffect(tabIndex) { prevTabIndex = tabIndex }
+            //    LaunchedEffect 在组合提交后才执行，而 transitionSpec 在整个动画
+            //    期间被反复求值 —— 那时 prevTabIndex 已被改写成当前值，forward
+            //    恒为 true，左右切换都朝同一方向滑。
+            //    改法：只读 AnimatedContent 自带的 initialState/targetState。
+            //
+            // ② 曾用 "tab:${tab.name}" 拼字符串，再在 transitionSpec 里
+            //    AppTab.valueOf(removePrefix("tab:")) 解析回来。一次 ${'$'} 转义
+            //    残留让值变成了字面量 "tab:${tab.name}"，valueOf 在首帧抛
+            //    IllegalArgumentException —— 表现为「一进 App 就闪退」，而编译器
+            //    完全不报错。字符串往返把编译期检查全丢了。
+            //    改法：换成 PageKey 密封类，方向读 ordinal、分发用穷尽 when。
+            val pageKey: PageKey = if (sub != SubPage.NONE) PageKey.Sub(sub) else PageKey.Tab(tab)
 
             Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
                 AnimatedContent(
                     targetState = pageKey,
                     transitionSpec = {
-                        val fromSub = initialState.startsWith("sub:")
-                        val toSub = targetState.startsWith("sub:")
                         // 两页同为 tab 时按枚举序定方向；进出二级页按层级定方向：
                         // 进去算前进（新页从右入），返回算后退（旧页从右出）。
+                        //
+                        // 先落到局部变量：initialState/targetState 是带自定义 getter
+                        // 的属性，直接写 is 判断拿不到智能转换。
+                        val from = initialState
+                        val to = targetState
                         val forward = when {
-                            !fromSub && !toSub ->
-                                AppTab.valueOf(targetState.removePrefix("tab:")).ordinal >=
-                                    AppTab.valueOf(initialState.removePrefix("tab:")).ordinal
-                            fromSub && toSub -> true
-                            else -> toSub
+                            from is PageKey.Tab && to is PageKey.Tab ->
+                                to.tab.ordinal >= from.tab.ordinal
+                            from is PageKey.Sub && to is PageKey.Sub -> true
+                            else -> to is PageKey.Sub
                         }
                         val dir = if (forward) 1 else -1
                         // 位移取 1/5 屏宽：整屏滑动在动画期间会把内容拉成模糊条带，
@@ -204,9 +226,8 @@ fun AppShell(context: Context, app: AppState) {
                     label = "page",
                 ) { k ->
                     Box(Modifier.fillMaxSize()) {
-                        if (k.startsWith("sub:")) {
-                            val page = SubPage.valueOf(k.removePrefix("sub:"))
-                            when (page) {
+                        when (k) {
+                            is PageKey.Sub -> when (k.page) {
                                 SubPage.USAGE -> UsageScreen(context, app)
                                 SubPage.INSPECTOR -> InspectorScreen(context, app)
                                 SubPage.STORAGE -> StorageScreen(context, app)
@@ -217,11 +238,11 @@ fun AppShell(context: Context, app: AppState) {
                                 SubPage.SCHEDULE -> ScheduleScreen(context, app)
                                 SubPage.UPDATE -> UpdateScreen(context, app)
                                 SubPage.ABOUT -> AboutScreen(context) { sub = SubPage.UPDATE }
+                                // NONE 不会走到这里（pageKey 在 NONE 时取 Tab 分支），
+                                // 但 when 必须穷尽，保底给个空。
                                 SubPage.NONE -> Unit
                             }
-                        } else {
-                            val page = AppTab.valueOf(k.removePrefix("tab:"))
-                            when (page) {
+                            is PageKey.Tab -> when (k.tab) {
                                 AppTab.OVERVIEW -> OverviewScreen(context, app) { sub = it }
                                 AppTab.ACCOUNTS -> AccountsScreen(context, app)
                                 AppTab.MODELS -> ModelsScreen(context, app)
