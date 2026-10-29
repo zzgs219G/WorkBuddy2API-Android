@@ -172,11 +172,16 @@ fun QoderScreen() {
             onClick = {
                 running = true
                 scope.launch {
-                    val r = withContext(Dispatchers.IO) { QoderVerify.run(context, pat) }
-                    report = r.lines
-                    reportText = r.lines.joinToString("\n")
-                    ok = r.ok
-                    running = false
+                    // finally 复位，原因同 GrowthScreen / AppState.task：
+                    // 协程被取消时后续语句不执行，状态会永久卡在「验证中」。
+                    try {
+                        val r = withContext(Dispatchers.IO) { QoderVerify.run(context, pat) }
+                        report = r.lines
+                        reportText = r.lines.joinToString("\n")
+                        ok = r.ok
+                    } finally {
+                        running = false
+                    }
                 }
             },
             enabled = !running && pat.isNotBlank(),
@@ -188,9 +193,12 @@ fun QoderScreen() {
             onClick = {
                 claiming = true
                 scope.launch {
-                    val r = withContext(Dispatchers.IO) { QoderClaim(pat).claimAll() }
-                    claimResult = r.message
-                    claiming = false
+                    try {
+                        val r = withContext(Dispatchers.IO) { QoderClaim(pat).claimAll() }
+                        claimResult = r.message
+                    } finally {
+                        claiming = false
+                    }
                 }
             },
             enabled = !claiming && pat.isNotBlank(),

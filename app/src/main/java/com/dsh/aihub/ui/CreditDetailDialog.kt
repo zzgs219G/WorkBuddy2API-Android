@@ -170,25 +170,48 @@ private fun PackagesSection(detail: JSONObject) {
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.primary)
     Spacer(Modifier.height(PcTokens.SpaceS / 2))
-    for (i in 0 until packages.length()) {
-        val p = packages.optJSONObject(i) ?: continue
+    // 按「到期紧迫度」排序，最快的排最前 —— 这是用户最该先看到的，
+    // 因为快到期的积分如果不优先消耗就会白白作废。
+    val sorted = (0 until packages.length())
+        .mapNotNull { packages.optJSONObject(it) }
+        .sortedBy { p ->
+            if (p.isNull("expire_at")) Double.MAX_VALUE else p.optDouble("expire_at", 0.0)
+        }
+    val nowSec = System.currentTimeMillis() / 1000.0
+    for (p in sorted) {
         val remain = p.optDouble("remaining", 0.0)
         val totalP = p.optDouble("total", 0.0)
         val kind = when {
             p.optDouble("CycleCapacitySize", 0.0) > 0 -> "周期额度"
             else -> "总额度"
         }
-        val expiry = listOf("ExpireTime", "PackageEndTime", "EndTime")
-            .firstNotNullOfOrNull { k -> p.opt(k)?.toString()?.toDoubleOrNull() }
+        // expire_at 由 NativeCore.expirySecondsOf 算好：已处理 DeductionEndTime
+        // 优先、哨兵值（>730 天视为不过期）过滤、秒/毫秒单位归一。
+        // 这里不再自己解析字段名 —— 那正是之前读不到到期时间的原因。
+        val expiry = if (p.isNull("expire_at")) null else p.optDouble("expire_at", 0.0)
+        val daysLeft = expiry?.let { (it - nowSec) / 86400.0 }
+        // 三重状态：已过期 / 临期（7 天内）/ 正常
+        val (hint, hintColor) = when {
+            daysLeft == null -> "不过期" to MaterialTheme.colorScheme.onSurfaceVariant
+            daysLeft < 0 -> "已过期" to MaterialTheme.colorScheme.error
+            daysLeft <= 7 -> "剩 ${daysLeft.toInt()} 天，优先消耗" to MaterialTheme.colorScheme.error
+            else -> "剩 ${daysLeft.toInt()} 天" to MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        // 只用余量的包不必占一整行，直接跳过展示噪声
         Text(
-            "$kind：${"%.1f".format(remain)} / ${"%.1f".format(totalP)}" +
-                (expiry?.let { "　到期 ${formatTime(it.toLong())}" } ?: "") +
-                (p.optString("ProductCode").takeIf { it.isNotBlank() }?.let { "　[$it]" } ?: ""),
+            "$kind：${"%.1f".format(remain)} / ${"%.1f".format(totalP)}　$hint",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = if (daysLeft != null && daysLeft <= 7) hintColor
+            else MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(2.dp))
     }
+    Spacer(Modifier.height(PcTokens.SpaceS / 2))
+    Text(
+        "快到期的资源包会被优先选中，避免积分作废。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 /** ④ 账本明细段：逐笔列出，最多显示最近 30 条。 */

@@ -122,13 +122,22 @@ fun GrowthScreen(context: Context, accountKey: String?) {
         running = true
         statusText = action
         scope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { block() } }
-            result.fold(
-                onSuccess = { statusText = it },
-                onFailure = { statusText = "失败：${it.message ?: it.javaClass.simpleName}" }
-            )
-            running = false
-            refresh()
+            // running 必须用 finally 复位。
+            //
+            // 与 AppState.task() 是同一个缺陷：原先 running = false 写在
+            // 协程体末尾，一旦 withContext 抛 CancellationException
+            // （Activity 重建、界面销毁导致 scope 的 Job 取消），
+            // 这行就永远执行不到，「执行中…」永久卡住且按钮不可点。
+            try {
+                val result = withContext(Dispatchers.IO) { runCatching { block() } }
+                result.fold(
+                    onSuccess = { statusText = it },
+                    onFailure = { statusText = "失败：${it.message ?: it.javaClass.simpleName}" }
+                )
+                refresh()
+            } finally {
+                running = false
+            }
         }
     }
 

@@ -857,9 +857,20 @@ object NativeCore {
             val r = if (cycle > 0) a.optDouble("CycleCapacityRemain") else a.optDouble("CapacityRemain")
             val t = if (cycle > 0) cycle else a.optDouble("CapacitySize")
             remain += r; total += t
-            packages.put(JSONObject(a.toString()).put("remaining", r).put("total", t))
-            val rawExpiry = listOf("ExpireTime", "PackageEndTime", "EndTime").firstNotNullOfOrNull { key -> a.opt(key)?.toString()?.toDoubleOrNull() }
-            if (rawExpiry != null && r > 0) { val sec = if (rawExpiry > 10_000_000_000L) rawExpiry / 1000 else rawExpiry; expire = expire?.coerceAtMost(sec) ?: sec }
+            // 每个包的到期时刻单独算，一起存进 packages —— 界面要按包展示
+            // 「这笔还剩多少、哪天作废」，只有一个总额度的最早到期日不够用。
+            val pkgExpire = expirySecondsOf(a, System.currentTimeMillis() / 1000.0)
+            packages.put(
+                JSONObject(a.toString())
+                    .put("remaining", r)
+                    .put("total", t)
+                    .put("expire_at", pkgExpire ?: JSONObject.NULL)
+            )
+            // 账号级的「最早到期」只统计还有余量的包：
+            // 一个已用尽的包即使更早到期，也不该影响选号时的临期判定。
+            if (pkgExpire != null && r > 0) {
+                expire = expire?.coerceAtMost(pkgExpire) ?: pkgExpire
+            }
         }
         store(context).setAccountCredits(source.key, remain, total, expire, packages)
         return JSONObject().put("uid", source.uid).put("account_key", source.key).put("region", source.region.id).put("region_label", source.region.label).put("remain", remain).put("total", total).put("expire_at", expire ?: JSONObject.NULL).put("packages", packages)
@@ -1207,6 +1218,49 @@ object NativeCore {
         val raw = auth.optLong("expiresAt", 0L)
         return if (raw in 1..9_999_999_999L) raw * 1000L else raw
     }
+    /**
+     * 一个资源包的「作废时刻」（epoch 秒）；无法判定时返回 null。
+     *
+     * 字段选择的依据（来自 workbuddy2api-hub 的实测校正，2026-10-08，31 行真实包数据）：
+     *
+     *  1) **必须优先 DeductionEndTime**（抵扣截止时间），而不是 CycleEndTime。
+     *     免费包 / 体验版这类包的 CycleEndTime 只是「每月计费周期的边界」，
+     *     与真正的抵扣截止能差 8 年。只认周期结束会让这些号每到月底都被
+     *     误判成「即将到期」，反而被优先派分 —— 结果是把流量全推给它们。
+     *
+     *  2) **哨兵值必须过滤**。上游用一个远超任何真实计费周期的时间表示
+     *     「不会过期」：Free Plan Subscription 与个人体验版的 DeductionEndTime
+     *     落在 2034/2035 年，而真实包周期是 14 天或 1 个月。
+     *     超过 [EXPIRY_SENTINEL_DAYS] 天一律当作「不过期」返回 null，
+     *     否则这些号会永久命中「7 天内到期」的临期优先分支，霸占所有请求。
+     *
+     * 单位处理：上游给的是 epoch 毫秒，也有按秒返回的情况（历史接口），
+     * 用 1e11 作为分界 —— 1e11 秒是公元 5138 年，任何合理的秒级时间戳都小于它。
+     *
+     * @param now 当前时刻（秒），由调用方传入以便测试注入
+     */
+    private fun expirySecondsOf(pkg: JSONObject, now: Double): Double? {
+        // 顺序即优先级：DeductionEndTime 最可信，CycleEndTime 只在缺失时回退。
+        // ExpireTime / PackageEndTime / EndTime 保留在末尾，属于历史字段名，
+        // 实测较少见但无害 —— 能取到就用。
+        val raw = listOf("DeductionEndTime", "CycleEndTime", "ExpireTime", "PackageEndTime", "EndTime")
+            .firstNotNullOfOrNull { key ->
+                pkg.opt(key)?.toString()?.takeIf { it.isNotBlank() && it != "null" && it != "0" }?.toDoubleOrNull()
+            } ?: return null
+
+        val seconds = if (raw > 1e11) raw / 1000.0 else raw
+        // 已经作废的包也返回真实时刻（绝对值），让界面能标出「已过期」；
+        // 由调用方决定是否统计（账号级只统计还有余量的包）。
+        val daysLeft = (seconds - now) / 86400.0
+        return when {
+            daysLeft > EXPIRY_SENTINEL_DAYS -> null   // 哨兵值：视为不过期
+            else -> seconds
+        }
+    }
+
+    /** 超过这个天数就当「不会过期」—— 见 [expirySecondsOf] 的说明。 */
+    private const val EXPIRY_SENTINEL_DAYS = 730.0
+
     private fun extractBillingAccounts(data: JSONObject): JSONArray = data.optJSONObject("data")?.optJSONObject("Response")?.optJSONObject("Data")?.optJSONArray("Accounts")
         ?: data.optJSONObject("data")?.optJSONObject("Response")?.optJSONArray("Accounts")
         ?: data.optJSONObject("data")?.optJSONArray("Accounts") ?: data.optJSONArray("Accounts") ?: JSONArray()

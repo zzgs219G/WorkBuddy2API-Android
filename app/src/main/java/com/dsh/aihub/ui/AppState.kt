@@ -119,7 +119,7 @@ class AppState(private val context: Context) {
      * 为什么把 try/catch 收在这里：原实现每个动作都写一遍
      * runCatching + main.post + showError，十几处重复且漏一处就会崩界面。
      */
-    private fun task(name: String, block: () -> String) {
+    private fun task(name: String, block: suspend () -> String) {
         if (busy) return
         busy = true
         scope.launch {
@@ -370,8 +370,15 @@ class AppState(private val context: Context) {
         val summary = response.optJSONObject("summary") ?: JSONObject()
         val results = response.optJSONArray("results") ?: JSONArray()
         val failed = (0 until results.length()).count { !results.optJSONObject(it).optBoolean("ok") }
-        credits = summary
-        bump()
+        // state 必须在主线程写。
+        //
+        // task() 的 block 跑在 scope 的 Dispatchers.IO 上，而 credits 是
+        // mutableStateOf —— 在非主线程写 Compose state 会绕过快照的线程约束，
+        // 表现是界面偶发不重组（刷新完了但数字没变），且不报错、难复现。
+        withContext(Dispatchers.Main) {
+            credits = summary
+            bump()
+        }
         "已刷新 ${results.length() - failed}/${results.length()} 个账号，合计剩余 " +
             "${FormatKit.credits(summary.optDouble("remain"))} / ${FormatKit.credits(summary.optDouble("total"))} 积分" +
             if (failed > 0) "，$failed 个失败" else ""
@@ -380,7 +387,8 @@ class AppState(private val context: Context) {
     fun checkInAll() = task("全部账号签到") {
         val response = NativeCore.checkInAll(context)
         val results = response.optJSONArray("results") ?: JSONArray()
-        checkinResults = results
+        // 同上：state 写主线程。
+        withContext(Dispatchers.Main) { checkinResults = results }
         // 签到会改变额度（并在服务端侧复查后写回本地缓存），因此顺带刷新账号列表，
         // 否则账号页仍显示签到前的旧额度，看起来像"签到了却没拿到积分"。
         loadAccounts()

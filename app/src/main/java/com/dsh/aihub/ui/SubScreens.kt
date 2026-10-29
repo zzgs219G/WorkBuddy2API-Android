@@ -33,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.dsh.aihub.ApiHostService
 import com.dsh.aihub.FormatKit
 import com.dsh.aihub.KeepAliveGuide
@@ -186,9 +188,13 @@ private fun BreakdownCard(rows: JSONArray?, key: String, emptyHint: String) {
 fun InspectorScreen(context: Context, app: AppState) {
     var showAll by remember { mutableStateOf(false) }
     var detailIndex by remember { mutableStateOf<Int?>(null) }
-    val entries = remember(app.revision) { app.inspectorEntries() }
-    // 与设置页同理：isEnabled 每次重组都读 SharedPreferences，
-    // 虽比 canDrawOverlays 轻，但没有理由每帧读一次。
+    // 取证记录含请求正文，条数多时读文件要几十毫秒 —— 不能放主线程。
+    // 原先写在 remember { } 里，会在首帧同步执行，表现为切进这一页时明显卡顿。
+    var entries by remember(app.revision) { mutableStateOf(org.json.JSONArray()) }
+    LaunchedEffect(app.revision) {
+        entries = withContext(Dispatchers.IO) { app.inspectorEntries() }
+    }
+    // isEnabled 只读 SharedPreferences，很轻，保留同步读取。
     val enabled = remember(app.revision) { app.inspectorEnabled() }
 
     LazyColumn(
@@ -300,8 +306,15 @@ fun InspectorScreen(context: Context, app: AppState) {
 @Composable
 fun StorageScreen(context: Context, app: AppState) {
     var detail by remember { mutableStateOf<String?>(null) }
-    val info = remember(app.revision) { app.storageInfo() }
-    val breakdown = remember(app.revision) { app.storageBreakdown() }
+    // 这两项都要扫描目录、统计文件大小，是最重的查询之一 —— 必须异步。
+    // 原先是 remember { } 里同步调用，切进存储页会掉帧（尤其在 WebView 缓存较大时）。
+    var info by remember(app.revision) { mutableStateOf(org.json.JSONObject()) }
+    var breakdown by remember(app.revision) { mutableStateOf(org.json.JSONObject()) }
+    LaunchedEffect(app.revision) {
+        val loaded = withContext(Dispatchers.IO) { app.storageInfo() to app.storageBreakdown() }
+        info = loaded.first
+        breakdown = loaded.second
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),

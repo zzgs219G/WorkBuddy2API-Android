@@ -466,6 +466,15 @@ private fun AccountCard(
                         }
                     )
                     add(account.optString("region_label", "国内版"))
+                    // 临期提示：账号级 credits_expire_at 是「还有余量的包里最早的那个」。
+                    // 7 天内到期的号会被选号逻辑优先使用（NativeStore.selectAccount 的
+                    // urgent 分支），把这件事显示出来，用户才知道"为什么总是这个号"。
+                    val expireAt = if (account.isNull("credits_expire_at")) null
+                    else account.optDouble("credits_expire_at", 0.0)
+                    if (expireAt != null) {
+                        val days = ((expireAt - System.currentTimeMillis() / 1000.0) / 86400.0).toInt()
+                        if (days in 0..7) add("⚠ ${days}天后到期")
+                    }
                     // 优先级必须露出来：它直接决定选号顺序（权重 ×(n+1)），
                     // 是"为什么总是这个号在被用"的唯一解释。收进菜单会让人
                     // 找不到原因 —— 之前压缩卡片时我把它藏起来了，是错的。
