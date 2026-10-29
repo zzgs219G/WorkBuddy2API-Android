@@ -66,58 +66,74 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------- 计算版本号 ----------
-      # 版本号是唯一入口：填整数或点分版本名都能用，留空则回退 gradle 里的默认值。
-      # 标签触发(v*)时版本名优先取标签（v2.0.0 → 2.0.0）。
+      # 只有一个真相来源：app/build.gradle.kts。
+      #
+      # 这里【不再】用正则去 gradle 文件里抠默认值。之前那么写，结果因为
+      #   versionCode = (findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 33
+      # 里 "versionCode = " 后面跟的是括号而不是数字，grep 匹配不到 →
+      # 退出码 1 → set -e 直接把整个 step 干掉（云端运行 #1 就是这么挂的）。
+      #
+      # 现在的做法：
+      #   · 用户填了版本号 → 换算成 name/code，通过 -P 传给 gradle
+      #   · 用户没填       → 什么都不传，gradle 用它自己的默认值
+      #   · 两种情况都在构建完成后从 APK 里读回真实版本号（见「读取产物版本号」步骤）
+      # 这样版本号只在 build.gradle.kts 里定义一次，不存在两边不一致的可能。
       - name: 计算版本号
         env:
           MANUAL_CODE: ${{ inputs.version_code }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -e
-          # gradle 里写的默认值，作为"留空"时的兜底
-          DEFAULT_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
-          DEFAULT_CODE=$(grep -oP 'versionCode = \K[0-9]+' app/build.gradle.kts)
-          if [[ "$TAG_NAME" == v* ]]; then
+          VERSION_NAME=""
+          VERSION_CODE=""
+          if [[ "$TAG_NAME" == v* ]] && [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            # 标签触发：版本名取标签（v2.0.0 → 2.0.0），版本号从版本名反推。
+            # 不用 `IFS=. read <<<` —— 在 set -e 下它的退出码会让脚本意外终止。
             VERSION_NAME="${TAG_NAME#v}"
-            VERSION_CODE="$MANUAL_CODE"
-            [ -n "$VERSION_CODE" ] || {
-              # 标签触发没填版本号时，从版本名反推（2.0.0 → 200）
-              MAJOR=$(echo "$VERSION_NAME" | cut -d. -f1)
-              MINOR=$(echo "$VERSION_NAME" | cut -d. -f2)
-              PATCH=$(echo "$VERSION_NAME" | cut -d. -f3)
-              VERSION_CODE=$((10#${MAJOR:-0} * 100 + 10#${MINOR:-0} * 10 + 10#${PATCH:-0}))
-            }
+            MAJOR="${VERSION_NAME%%.*}"
+            REST="${VERSION_NAME#*.}"
+            MINOR="${REST%%.*}"
+            PATCH="${REST#*.}"
+            # 标签可能是不带点的形式（v2），此时 REST 等于原文，MINOR/PATCH 会等于整串。
+            # 只接受 x.y.z 三段，其它情况直接报错，避免算出荒谬的版本号。
+            if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::标签 $TAG_NAME 不是 v主.次.修订 格式（如 v2.0.0）"
+              exit 1
+            fi
+            VERSION_CODE=$((10#$MAJOR * 100 + 10#$MINOR * 10 + 10#$PATCH))
           elif [ -n "$MANUAL_CODE" ]; then
             if [[ "$MANUAL_CODE" =~ ^[0-9]+$ ]]; then
-              MAJOR=$((10#$MANUAL_CODE / 100))
-              MINOR=$(((10#$MANUAL_CODE % 100) / 10))
-              PATCH=$((10#$MANUAL_CODE % 10))
-              VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
+              VERSION_NAME="$((10#$MANUAL_CODE / 100)).$(((10#$MANUAL_CODE % 100) / 10)).$((10#$MANUAL_CODE % 10))"
               VERSION_CODE="$MANUAL_CODE"
             elif [[ "$MANUAL_CODE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              MAJOR=$(echo "$MANUAL_CODE" | cut -d. -f1)
-              MINOR=$(echo "$MANUAL_CODE" | cut -d. -f2)
-              PATCH=$(echo "$MANUAL_CODE" | cut -d. -f3)
               VERSION_NAME="$MANUAL_CODE"
+              MAJOR="${VERSION_NAME%%.*}"
+              REST="${VERSION_NAME#*.}"
+              MINOR="${REST%%.*}"
+              PATCH="${REST#*.}"
               VERSION_CODE=$((10#$MAJOR * 100 + 10#$MINOR * 10 + 10#$PATCH))
             else
-              echo "❌ 版本号需为整数（如 200）或版本名（如 2.0.0），收到：$MANUAL_CODE"
+              echo "::error::版本号需为整数（如 200）或版本名（如 2.0.0），收到：$MANUAL_CODE"
               exit 1
             fi
           else
-            echo "⚠ 未填版本号，使用 gradle 默认值 ${DEFAULT_CODE}(${DEFAULT_NAME})"
-            VERSION_NAME="$DEFAULT_NAME"
-            VERSION_CODE="$DEFAULT_CODE"
+            echo "ℹ 未指定版本号 → 使用 app/build.gradle.kts 里的默认值（构建后从 APK 读回实际值）"
           fi
+          # 未指定时留空，后续步骤会从 APK 读回真实值；命名阶段必须处理空值。
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
-          echo "✔ 版本名称=$VERSION_NAME  版本号=$VERSION_CODE"
+          if [ -n "$VERSION_CODE" ]; then
+            echo "GRADLE_VERSION_ARGS=-PappVersionCode=${VERSION_CODE} -PappVersionName=${VERSION_NAME}" >> "$GITHUB_ENV"
+            echo "✔ 将注入版本：$VERSION_NAME ($VERSION_CODE)"
+          else
+            echo "GRADLE_VERSION_ARGS=" >> "$GITHUB_ENV"
+          fi
 
       # ---------- 确定打包类型 ----------
       - name: 确定打包类型
         run: |
           BT="${{ inputs.build_type }}"
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             BT="正式版(release)"
           fi
           if [ "$BT" = "正式版(release)" ]; then
@@ -217,38 +233,46 @@ jobs:
           echo "📋 日志模式：${GRADLE_LOG_FLAGS:-快速（精简）}"
           # 版本号走 -P 而不是环境变量：Gradle daemon 会固化启动时的环境变量，
           # 之后 System.getenv 读到的是 daemon 的环境，注入会失效（实测过）。
+          # GRADLE_VERSION_ARGS 为空时不传任何 -P，gradle 用自己的默认值。
           # 全部(both) 时 GRADLE_TASK 含两个任务，不能加引号
           # shellcheck disable=SC2086
-          ./gradlew ${GRADLE_TASK} \
-            -PappVersionCode="${VERSION_CODE}" \
-            -PappVersionName="${VERSION_NAME}" \
+          ./gradlew ${GRADLE_TASK} ${GRADLE_VERSION_ARGS} \
             -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
             --stacktrace --console=plain --build-cache ${GRADLE_LOG_FLAGS} \
             2>&1 | tee build-log/gradle.log
 
-      # ---------- 校验版本号真的进了包 ----------
-      # 只打印日志不算验证：必须从 APK 里读回来核对，否则注入失效会静默通过。
-      - name: 🔍 校验产物版本号
+      # ---------- 从产物里读回真实版本号 ----------
+      # 用户没填版本号时，上面的 VERSION_NAME/VERSION_CODE 是空的；
+      # 这里从 APK 读回实际值，供后续「校验」「命名」「Artifact 名」使用。
+      # 只认一个真相来源：APK 里实际打进去的版本号。
+      - name: 🔍 读取产物版本号
         if: success()
         run: |
           set -e
           AAPT2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)
-          FAILED=0
-          for APK in app/build/outputs/apk/*/*.apk; do
-            [ -e "$APK" ] || continue
-            INFO=$("$AAPT2" dump badging "$APK" 2>/dev/null | head -1)
-            GOT_CODE=$(echo "$INFO" | grep -oP "versionCode='\K[0-9]+")
-            GOT_NAME=$(echo "$INFO" | grep -oP "versionName='\K[^']+")
-            echo "$APK → versionCode=$GOT_CODE versionName=$GOT_NAME（期望 $VERSION_CODE / $VERSION_NAME）"
-            # release 退回 debug 签名时也算通过，只校验版本
-            if [ "$GOT_CODE" != "$VERSION_CODE" ] || [ "$GOT_NAME" != "$VERSION_NAME" ]; then
-              echo "::error::$APK 版本号未按预期注入"
-              FAILED=1
-            fi
-          done
-          [ "$FAILED" -eq 0 ] || exit 1
-          echo "✔ 版本号校验通过"
+          FIRST_APK=$(ls app/build/outputs/apk/*/*.apk 2>/dev/null | head -1)
+          if [ -z "$FIRST_APK" ]; then
+            echo "::error::没有找到任何 APK 产物"
+            exit 1
+          fi
+          INFO=$("$AAPT2" dump badging "$FIRST_APK" 2>/dev/null | head -1)
+          GOT_CODE=$(echo "$INFO" | grep -oP "versionCode='\K[0-9]+")
+          GOT_NAME=$(echo "$INFO" | grep -oP "versionName='\K[^']+")
+          if [ -z "$GOT_CODE" ] || [ -z "$GOT_NAME" ]; then
+            echo "::error::无法从 $FIRST_APK 读取版本号"
+            exit 1
+          fi
+          # 用户填了版本号，就必须和填的一致；没填则以 APK 里的为准
+          if [ -n "$VERSION_CODE" ] && { [ "$GOT_CODE" != "$VERSION_CODE" ] || [ "$GOT_NAME" != "$VERSION_NAME" ]; }; then
+            echo "::error::版本号注入失败：期望 $VERSION_NAME($VERSION_CODE)，实际 $GOT_NAME($GOT_CODE)"
+            exit 1
+          fi
+          echo "VERSION_NAME=$GOT_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$GOT_CODE" >> "$GITHUB_ENV"
+          echo "✔ 产物版本：$GOT_NAME ($GOT_CODE)"
 
+      # ---------- 校验版本号真的进了包 ----------
+      # 只打印日志不算验证：必须从 APK 里读回来核对，否则注入失效会静默通过。
       # ---------- 整理产物 ----------
       - name: 📦 整理 APK 产物
         if: success()

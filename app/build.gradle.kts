@@ -227,4 +227,12 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.1")
     implementation("top.yukonga.miuix.kmp:miuix-preference:0.9.1")
     implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.1")
+
+    // ---- 单元测试（JVM，不跑设备）----
+    // 只用于纯逻辑：失败分类、协议转换这类「写错了不会崩、只会静默给出错误结论」
+    // 的函数。当前覆盖 FailureDiagnosis（见 app/src/test）。
+    testImplementation("junit:junit:4.13.2")
+    // org.json 在 Android 单元测试里是 stub（方法全抛 RuntimeException），
+    // 必须给 JVM 侧一份真实实现，否则任何碰 JSONObject 的用例都会挂。
+    testImplementation("org.json:json:20240303")
 }

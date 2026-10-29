@@ -222,9 +222,16 @@ object NativeCore {
         sessionKey: String? = null,
     ): Account {
         migrateLegacy(context)
-        val selected = store(context).selectAccountForSession(sessionKey, region?.id) ?: throw IOException(
-            if (region == null) "尚未导入可用的 WorkBuddy 账号" else "没有可用的${region.label}账号"
-        )
+        val selected = store(context).selectAccountForSession(sessionKey, region?.id) ?: run {
+            // 选不到账号有两种原因，处理方式完全不同：一个都没登录 vs. 全部在冷却。
+            // 改动前两者共用一句「没有可用的账号」，用户无法判断该去重新登录还是该等。
+            val all = store(context).listAccounts()
+            val total = (0 until all.length())
+                .count { all.optJSONObject(it)?.optInt("enabled", 1) == 1 }
+            val cooling = total - store(context).countHealthy(region?.id)
+            val diagnosis = FailureDiagnosis.fromNoAccount(total, cooling)
+            throw IOException("${diagnosis.summary} ｜ ${diagnosis.action}")
+        }
         var account = loadAccount(context, selected.getString("account_key")) ?: throw IOException("账号认证数据缺失")
         val expiresAt = normalizedExpiryMillis(account.auth)
         if (expiresAt > 0 && System.currentTimeMillis() >= expiresAt - refreshLeadMs(account)) {

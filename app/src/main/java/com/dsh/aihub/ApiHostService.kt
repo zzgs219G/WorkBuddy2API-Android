@@ -349,7 +349,11 @@ class ApiHostService : Service() {
             logRejected(method, path, startedAt, "bad json", selectedApp)
             json(output, 400, apiError("bad json", "invalid_request_error"))
         } catch (e: IOException) {
-            json(output, 503, apiError(e.message ?: "服务不可用", "upstream_error"))
+            // 走到这里说明 proxy 已经无法自救（换号重试也失败）。
+            // 记录里留下分类与建议，而不是只留一句异常文本。
+            val diagnosis = FailureDiagnosis.fromNetwork(e)
+            Log.w(TAG, "gateway IO failure ${diagnosis.kind.wire}: ${diagnosis.summary} ｜ ${diagnosis.action}")
+            json(output, 503, apiError("${diagnosis.summary} ｜ ${diagnosis.action}", "upstream_error"))
         } catch (e: Exception) {
             Log.e(TAG, "gateway failure", e)
             json(output, 500, apiError("内部网关错误", "api_error"))
@@ -450,7 +454,9 @@ class ApiHostService : Service() {
                     val healthy = NativeCore.store(this).countHealthy(region.id)
                     Log.w(TAG, "upstream $code on ${account.uid}; retrying with another account (healthy=$healthy)")
                     if (healthy < 1) {
-                        logUsage(protocol, model, startedAt, "error", "HTTP $code", null, inputSummary, "", "", app, account)
+                        logUsage(protocol, model, startedAt, "error",
+                            FailureDiagnosis.toRecordLine(FailureDiagnosis.fromHttp(code, raw)),
+                            null, inputSummary, "", "", app, account)
                         json(output, code, safeUpstreamError(raw, code))
                         return
                     }
@@ -462,7 +468,13 @@ class ApiHostService : Service() {
                 // 内容安全 / 11128），逐字匹配必然漏。宁可多触发一次降级（代价只是
                 // 当天用一句通用提示词），也不要漏掉导致用户整天不可用。
                 maybeDegradePrompt(this@ApiHostService, code, raw)
-                logUsage(protocol, model, startedAt, "error", "HTTP $code", null, inputSummary, "", "", app, account)
+                // 失败原因落到记录里，而不是只留 "HTTP $code"。
+                // 这样「记录」页能看到分类与建议动作，用户不必翻 logcat 才知道
+                // 是额度用完（换号）还是上游改版（等更新）。
+                val diagnosis = FailureDiagnosis.fromHttp(code, raw)
+                Log.w(TAG, "upstream failure ${diagnosis.kind.wire}: ${diagnosis.summary}")
+                logUsage(protocol, model, startedAt, "error", FailureDiagnosis.toRecordLine(diagnosis),
+                    null, inputSummary, "", "", app, account)
                 json(output, code, errorBody)
                 return
             }

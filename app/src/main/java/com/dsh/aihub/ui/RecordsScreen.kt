@@ -90,6 +90,22 @@ fun RecordsScreen(context: Context, app: AppState) {
     val totalCredits = filtered.sumOf { it.optDouble("credits", 0.0) }
     val totalTokens = filtered.sumOf { it.optLong("total_tokens") }
 
+    // 失败原因分布：把已落库的 `[kind] summary ｜ 建议：action` 按 kind 聚合。
+    //
+    // 这是「失效了为什么失效」在界面上的落点：此前失败记录只有一行 `status=error`，
+    // 用户必须逐条点开看 error 文本才知道到底怎么回事，条数一多就无法归纳。
+    // 这里只统计被筛选出来的失败条目，和下方列表口径一致。
+    val failureKinds = remember(filtered) {
+        filtered.filter { it.optString("status", "ok") != "ok" }
+            .mapNotNull { it.optString("error").takeIf { t -> t.isNotBlank() } }
+            // 记录格式固定为 "[kind] ..."，取方括号内的 wire 名
+            .map { it.substringAfter('[', "").substringBefore(']', "") }
+            .filter { it.isNotBlank() }
+            .groupingBy { it }
+            .eachCount()
+            .entries.sortedByDescending { it.value }
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(top = PcTokens.SpaceM, bottom = 32.dp),
@@ -101,6 +117,19 @@ fun RecordsScreen(context: Context, app: AppState) {
                 PcInfoRow("当前筛选", "${filtered.size} 条")
                 PcInfoRow("消耗积分", "%.2f".format(totalCredits))
                 PcInfoRow("消耗 Tokens", FormatKit.tokens(totalTokens))
+                if (failureKinds.isNotEmpty()) {
+                    Spacer(Modifier.height(PcTokens.SpaceS))
+                    // 失败原因按类型聚合成一行，按条数降序。
+                    // 只看这一行就能判断「今天到底是额度用完、被限流，还是上游改版了」，
+                    // 不必逐条点开 error 文本。
+                    Text(
+                        "失败原因：" + failureKinds.joinToString(" · ") { (kind, count) ->
+                            "${kindLabel(kind)} $count"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
                 Spacer(Modifier.height(PcTokens.SpaceM))
                 // 【M3 移植】Miuix 的 TabRow 是「tabs 列表 + selectedTabIndex + onTabSelected」，
                 //   Material3 的 TabRow 则是内容槽（尾随 lambda 里自己放 Tab）。
@@ -278,4 +307,25 @@ private fun UsageRecordCard(
             )
         }
     }
+}
+
+/**
+ * 失败类型的中文短标签。
+ *
+ * 记录里存的是 [FailureDiagnosis.Kind.wire]（英文枚举名），因为它是入库格式、
+ * 需要稳定；界面则展示中文，避免用户对着 `hard_credit` 猜意思。
+ *
+ * 未收录的值原样返回：宁可显示英文，也不要把未知类型硬塞进某个已知分类。
+ */
+private fun kindLabel(wire: String): String = when (wire) {
+    "hard_credit" -> "额度不足"
+    "soft_rate" -> "被限流"
+    "session_dead" -> "登录失效"
+    "client" -> "请求被拒"
+    "not_found" -> "接口不存在"
+    "server" -> "上游异常"
+    "network" -> "网络故障"
+    "no_account" -> "无可用账号"
+    "unknown" -> "未识别"
+    else -> wire
 }
