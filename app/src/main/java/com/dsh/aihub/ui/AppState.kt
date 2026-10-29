@@ -268,6 +268,36 @@ class AppState(private val context: Context) {
      * 界面无从体现，用户会以为按钮失效。这里在请求发出后立刻把状态置为
      * 「启动中」，并由宿主在收到广播后切成最终状态。
      */
+    /**
+     * 重启本地服务，让「监听地址」一类只在启动时读取的设置立刻生效。
+     *
+     * 为什么需要单独一个入口：`ServerSocket` 的绑定地址在服务启动那一刻固定，
+     * 之后改设置不会改变已绑定的 socket。典型场景是局域网开关：
+     * 用户打开开关，界面显示 0.0.0.0，但服务实际还监听 127.0.0.1 ——
+     * 外面永远连不上，且没有任何报错能提示这件事。
+     *
+     * 实现上是「先停后启」：STOP 是同步的（服务自己收尾并关闭 socket），
+     * 但关闭到端口真正释放有一小段延迟，立即重新绑定可能拿到
+     * "Address already in use"。所以停完等一小会儿再启。
+     */
+    fun restartServer(activity: Activity?) {
+        val target = activity ?: context as? Activity ?: return
+        scope.launch {
+            target.startService(Intent(target, ApiHostService::class.java).setAction(ApiHostService.ACTION_STOP))
+            record("监听设置已变更，正在重启服务…")
+            // 等旧 socket 关闭并释放端口。500ms 足够本机回环上的 TIME_WAIT 收敛，
+            // 又短到用户感觉不出停顿。
+            kotlinx.coroutines.delay(500)
+            withContext(Dispatchers.Main) {
+                startingUp = true
+                val intent = Intent(target, ApiHostService::class.java)
+                if (android.os.Build.VERSION.SDK_INT >= 26) target.startForegroundService(intent)
+                else target.startService(intent)
+                record("服务已按新监听地址重启")
+            }
+        }
+    }
+
     fun toggleServer(activity: Activity?) {
         val target = activity ?: context as? Activity ?: return
         if (serviceRunning) {

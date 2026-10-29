@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.dsh.aihub.ApiHostService
 import com.dsh.aihub.LanAddress
@@ -39,6 +40,8 @@ import com.dsh.aihub.m3.SectionTitle
  */
 @Composable
 fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit) {
+    // restartServer 需要 Activity 来启动前台服务；从 LocalContext 取。
+    val activity = LocalContext.current as? android.app.Activity
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(top = PcTokens.SpaceM, bottom = 32.dp),
@@ -66,10 +69,22 @@ fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                 )
                 SwitchRow(
                     title = "允许局域网访问",
-                    summary = "默认只监听 127.0.0.1（仅本机可调用）。开启后同一 WiFi 下的设备也能访问，"
-                        + "请确认 API Key 未泄漏再打开",
+                    summary = "默认只监听 127.0.0.1（仅本机可调用）。开启后同一 WiFi 下的设备也能访问；"
+                        + "切换会重启服务（监听地址在启动时绑定一次）",
                     checked = app.settings.optString("lanAccess", "0") in setOf("1", "true"),
-                    onChange = { app.saveSetting("lanAccess", if (it) "1" else "0") }
+                    onChange = { enabled ->
+                        app.saveSetting("lanAccess", if (enabled) "1" else "0")
+                        // 必须在服务重启后才生效 —— 这是「开了局域网却连不上」的主因。
+                        //
+                        // 监听地址（127.0.0.1 / 0.0.0.0）在 ServerSocket 创建时绑定，
+                        // 只在服务启动那一刻决定一次。改完设置若只写库，服务仍绑在
+                        // 旧地址上：
+                        //   · 刚打开局域网 → 实际还在 127.0.0.1，外面连不上
+                        //   · 刚关闭局域网 → 实际还在 0.0.0.0，暴露面没有收回
+                        // 而界面上的开关与「监听地址」文案已经变了，用户完全无从察觉。
+                        // 所以这里主动重启一次，让新设置立刻生效。
+                        if (app.serviceRunning) app.restartServer(activity)
+                    }
                 )
                 // Origin 严格校验的逃生口。
                 //
@@ -181,6 +196,14 @@ fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                             copyToClipboard(context, it)
                             app.showMessage("已复制：$it")
                         }
+                        // 连不上时最常见的原因写在这里，省得用户反复试。
+                        PcInfoRow(
+                            "连不上时",
+                            "① 确认服务已重启（切开关会自动重启）\n" +
+                                "② 两个设备必须连同一个 WiFi，且没开 AP 隔离/访客网络\n" +
+                                "③ 手机上的系统防火墙或有线网卡代理可能拦截 8788\n" +
+                                "④ 电脑上先试：curl http://${lan.address}:${ApiHostService.PORT}/health"
+                        )
                     }
                 }
                 // 更新入口放在「关于」而非独立 Tab：更新是低频操作，
