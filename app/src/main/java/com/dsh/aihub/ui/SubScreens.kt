@@ -65,13 +65,28 @@ fun UsageScreen(context: Context, app: AppState) {
         verticalArrangement = Arrangement.spacedBy(PcTokens.CardGap)
     ) {
         item {
-            PcCard(title = "总量") {
-                PcInfoRow("今日请求", (summary?.optLong("today_requests") ?: 0).toString())
-                PcInfoRow("今日 Tokens", FormatKit.tokens(summary?.optLong("today_tokens") ?: 0))
-                PcInfoRow("总请求", (summary?.optLong("total_requests") ?: 0).toString())
-                PcInfoRow("总 Tokens", FormatKit.tokens(summary?.optLong("total_tokens") ?: 0))
+            // 4 行改成一排指标 + 一行累计。
+            // 原来「今日请求 / 今日 Tokens / 总请求 / 总 Tokens」四行并列，
+            // 权重完全相同，看不出主次 —— 而今日数据才是这一页的高频关注点。
+            PcCard(title = "用量") {
+                PcMetricRow(
+                    listOf(
+                        "今日请求" to (summary?.optLong("today_requests") ?: 0).toString(),
+                        "今日 Tokens" to FormatKit.tokens(summary?.optLong("today_tokens") ?: 0),
+                    )
+                )
                 Spacer(Modifier.height(PcTokens.SpaceS))
-                Button(onClick = { app.loadUsage() }, modifier = Modifier.fillMaxWidth()) { Text("刷新统计") }
+                PcInlineFacts(
+                    listOf(
+                        "累计请求" to (summary?.optLong("total_requests") ?: 0).toString(),
+                        "累计 Tokens" to FormatKit.tokens(summary?.optLong("total_tokens") ?: 0),
+                    )
+                )
+                Spacer(Modifier.height(PcTokens.SpaceS))
+                TextButton(
+                    onClick = { app.loadUsage() },
+                    enabled = !app.busy,
+                ) { Text(if (app.busy) "刷新中…" else "刷新统计") }
             }
         }
 
@@ -322,27 +337,56 @@ fun StorageScreen(context: Context, app: AppState) {
         verticalArrangement = Arrangement.spacedBy(PcTokens.CardGap)
     ) {
         item {
+            // 8 行改成「3 个指标 + 1 行子项」。
+            // 原来「内容合计」下面又列「· 输入 / · 输出 / · 思考链」三个子行，
+            // 四个数字占了四行 —— 而它们同属「内容占用」这一个概念。
             PcCard(title = "数据库") {
-                PcInfoRow("文件大小", FormatKit.bytes(info.optLong("db_bytes")))
-                PcInfoRow("记录条数", info.optLong("rows").toString())
-                PcInfoRow("可回收空闲", FormatKit.bytes(info.optLong("free_bytes")))
+                PcMetricRow(
+                    listOf(
+                        "文件大小" to FormatKit.bytes(info.optLong("db_bytes")),
+                        "记录条数" to info.optLong("rows").toString(),
+                        "可回收" to FormatKit.bytes(info.optLong("free_bytes")),
+                    )
+                )
                 val content = info.optLong("input_bytes") + info.optLong("output_bytes") + info.optLong("reasoning_bytes")
-                PcInfoRow("内容合计", FormatKit.bytes(content))
-                PcInfoRow("· 输入", FormatKit.bytes(info.optLong("input_bytes")))
-                PcInfoRow("· 输出", FormatKit.bytes(info.optLong("output_bytes")))
-                PcInfoRow("· 思考链", FormatKit.bytes(info.optLong("reasoning_bytes")))
+                if (content > 0) {
+                    Spacer(Modifier.height(PcTokens.SpaceS))
+                    PcInlineFacts(
+                        listOf(
+                            "内容合计" to FormatKit.bytes(content),
+                            "输入" to FormatKit.bytes(info.optLong("input_bytes")),
+                            "输出" to FormatKit.bytes(info.optLong("output_bytes")),
+                            "思考链" to FormatKit.bytes(info.optLong("reasoning_bytes")),
+                        )
+                    )
+                }
             }
         }
 
         item {
+            // 7 行改成「1 个总数指标 + 2 行分组子项」。
+            // 子项按「可清理 / 不可清理」分组比平铺更有用 ——
+            // 用户来这里的目的通常是"能腾出多少空间"。
             PcCard(title = "目录占用（实测）") {
-                PcInfoRow("数据目录合计", FormatKit.bytes(breakdown.optLong("data_total")))
-                PcInfoRow("· 数据库", FormatKit.bytes(breakdown.optLong("databases")))
-                PcInfoRow("· WebView 缓存", FormatKit.bytes(breakdown.optLong("webview")))
-                PcInfoRow("· cache", FormatKit.bytes(breakdown.optLong("cache")))
-                PcInfoRow("· files", FormatKit.bytes(breakdown.optLong("files")))
-                PcInfoRow("· code_cache", FormatKit.bytes(breakdown.optLong("code_cache")))
-                PcInfoRow("· 外部缓存", FormatKit.bytes(breakdown.optLong("external_cache")))
+                PcMetricRow(
+                    listOf("数据目录合计" to FormatKit.bytes(breakdown.optLong("data_total")))
+                )
+                Spacer(Modifier.height(PcTokens.SpaceS))
+                PcInlineFacts(
+                    listOf(
+                        "数据库" to FormatKit.bytes(breakdown.optLong("databases")),
+                        "files" to FormatKit.bytes(breakdown.optLong("files")),
+                    )
+                )
+                Spacer(Modifier.height(2.dp))
+                PcInlineFacts(
+                    listOf(
+                        "WebView 缓存" to FormatKit.bytes(breakdown.optLong("webview")),
+                        "cache" to FormatKit.bytes(breakdown.optLong("cache")),
+                        "code_cache" to FormatKit.bytes(breakdown.optLong("code_cache")),
+                        "外部缓存" to FormatKit.bytes(breakdown.optLong("external_cache")),
+                    )
+                )
             }
         }
 

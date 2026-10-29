@@ -1,6 +1,11 @@
 package com.dsh.aihub.ui
 
 import android.content.Context
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -23,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.dsh.aihub.AccountRegion
 import kotlinx.coroutines.Dispatchers
@@ -112,11 +118,23 @@ fun RecordsScreen(context: Context, app: AppState) {
         verticalArrangement = Arrangement.spacedBy(PcTokens.CardGap)
     ) {
         item {
-            PcCard(title = "API 调用记录") {
-                PcInfoRow("总条数", app.usageTotal.toString())
-                PcInfoRow("当前筛选", "${filtered.size} 条")
-                PcInfoRow("消耗积分", "%.2f".format(totalCredits))
-                PcInfoRow("消耗 Tokens", FormatKit.tokens(totalTokens))
+            PcCard(title = "调用记录") {
+                // 4 行标签值 → 一排指标。
+                // 「总条数」与「当前筛选」的区别只在筛选时才有意义，
+                // 因此把筛选条数放进指标、总数降为小字。
+                PcMetricRow(
+                    listOf(
+                        "本次筛选" to "${filtered.size}",
+                        "消耗积分" to "%.0f".format(totalCredits),
+                        "Tokens" to FormatKit.tokens(totalTokens),
+                    )
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "共 ${app.usageTotal} 条记录",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 if (failureKinds.isNotEmpty()) {
                     Spacer(Modifier.height(PcTokens.SpaceS))
                     // 失败原因按类型聚合成一行，按条数降序。
@@ -144,14 +162,8 @@ fun RecordsScreen(context: Context, app: AppState) {
                         )
                     }
                 }
-                Spacer(Modifier.height(PcTokens.SpaceS))
-                Text(
-                    "逐条记录模型、应用、扣费账号、Tokens 与积分消耗。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 // 刷新是记录页最常用的动作（数据随时间增长），与清空并列成组。
-                Spacer(Modifier.height(PcTokens.SpaceM))
+                Spacer(Modifier.height(PcTokens.SpaceS))
                 PcActionGrid(
                     actions = listOf(
                         PcAction("刷新", primary = true, enabled = !app.busy) { app.loadUsage() },
@@ -236,6 +248,7 @@ fun RecordsScreen(context: Context, app: AppState) {
 }
 
 /** 单条记录卡：状态、模型、扣费账号、应用、Tokens、积分、延迟、错误。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UsageRecordCard(
     item: org.json.JSONObject,
@@ -258,53 +271,88 @@ private fun UsageRecordCard(
     //   AppCard 与原 PcCard 一样自带页面左右边距，故不再在调用点叠加 PcTokens.PageGutter，
     //   否则会出现「卡片边距 + 调用点边距」的双重缩进（与 PcComponents 里记录的同款踩坑一致）。
     //   insideMargin 参数在 M3 的 Card 中不存在，改为 AppCard 的 contentPadding。
+    var menuOpen by remember { mutableStateOf(false) }
     AppCard(
-        contentPadding = PaddingValues(horizontal = PcTokens.SpaceL, vertical = PcTokens.SpaceM)
+        // 3 行的紧凑卡片用 SpaceS 内边距：SpaceM 会让上下各多出 14dp 空白，
+        // 一屏少看两条记录。
+        contentPadding = PaddingValues(horizontal = PcTokens.SpaceL, vertical = PcTokens.SpaceS),
+        modifier = Modifier.combinedClickable(
+            onClick = onOpenDetail,
+            onLongClick = { menuOpen = true },
+        ),
     ) {
+        Box {
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("查看内容") },
+                    onClick = { menuOpen = false; onOpenDetail() }
+                )
+                DropdownMenuItem(
+                    text = { Text("删除这条", color = MaterialTheme.colorScheme.error) },
+                    onClick = { menuOpen = false; onDelete() }
+                )
+            }
+        }
         Column {
-            // 首行：状态 + 时间 + 序号
+            // 单条记录从 9 行压到 2 行 + 一行操作。
+            //
+            // 原版每条：状态/时间/序号、模型、扣费账号、应用、协议、
+            // Tokens（还带输入/输出/合计三段）、积分、耗时 = 9 行 ≈ 300dp。
+            // 一屏只能看两条，而这个页面的实际用途是「快速扫一眼有没有异常」。
+            //
+            // 现在按「扫视时真正会看的三件事」组织：
+            //   第一行：模型 + 消耗积分（最右，对齐成列便于比较）
+            //   第二行：时间 · 账号 · tokens · 耗时（一行小字）
+            // 其余（应用、协议、完整 UID、错误详情）都在「查看内容」里。
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    item.optString("status", "ok"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.weight(1f)
+                    item.optString("model", "auto"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+                if (!ok) {
+                    Text(
+                        "✗ ",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
                 Text(
-                    "$time · #$id",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    "%.2f".format(credits),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (ok) MaterialTheme.colorScheme.onSurface
+                    else MaterialTheme.colorScheme.error
                 )
             }
-            Spacer(Modifier.height(PcTokens.SpaceS))
-            Text(item.optString("model", "auto"), style = MaterialTheme.typography.bodyLarge)
-            Spacer(Modifier.height(PcTokens.SpaceS))
-
-            // 核心信息：谁在扣分（账号）
-            PcInfoRow("扣费账号", accountLabel ?: if (uid.isBlank()) "未记录" else FormatKit.shortUid(uid))
-            PcInfoRow("应用", item.optString("app_name").ifBlank { "未命名" })
-            PcInfoRow("协议", item.optString("protocol"))
-            PcInfoRow(
-                "Tokens",
-                "输入 ${FormatKit.tokens(item.optLong("input_tokens"))} · " +
-                    "输出 ${FormatKit.tokens(item.optLong("output_tokens"))} · " +
-                    "合计 ${FormatKit.tokens(item.optLong("total_tokens"))}"
+            Spacer(Modifier.height(2.dp))
+            Text(
+                buildList {
+                    add(time)
+                    add(accountLabel ?: if (uid.isBlank()) "未记录" else FormatKit.shortUid(uid))
+                    add("${FormatKit.tokens(item.optLong("total_tokens"))} tok")
+                    add("${item.optLong("latency_ms")}ms")
+                    if (!ok && item.optString("error").isNotBlank()) {
+                        // 失败时把分类前缀拿出来（记录格式 "[kind] ..."），
+                        // 完整文案留给详情页。
+                        val kind = item.optString("error").substringAfter('[', "").substringBefore(']', "")
+                        if (kind.isNotBlank()) add(kindLabel(kind))
+                    }
+                }.joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (ok) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.error,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            PcInfoRow("积分消耗", "%.2f".format(credits))
-            PcInfoRow("耗时", "${item.optLong("latency_ms")} ms")
-
-            if (item.optString("error").isNotBlank()) {
-                Spacer(Modifier.height(PcTokens.SpaceS))
-                Text(item.optString("error"), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error)
-            }
-            Spacer(Modifier.height(PcTokens.SpaceM))
-            PcActionGrid(
-                actions = listOf(
-                    PcAction("查看内容", primary = true) { onOpenDetail() },
-                    PcAction("删除这条") { onDelete() }
-                )
-            )
+            // 不再放两个按钮。
+            //
+            // 每条记录配一组按钮，一屏两条就要多花 100dp，而这两个动作
+            // 都有更省空间的入口：
+            //   · 查看内容 → 点整张卡片（列表项的主体动作，符合列表直觉）
+            //   · 删除     → 长按弹出菜单（低频且不可逆，正好用长按防误触）
+            // 与账号卡的「长按/菜单」策略一致。
         }
     }
 }

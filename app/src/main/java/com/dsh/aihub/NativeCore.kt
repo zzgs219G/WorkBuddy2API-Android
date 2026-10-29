@@ -699,11 +699,28 @@ object NativeCore {
         val total = after?.optDouble("total")
         val gained = if (before != null && remaining != null) remaining - before else null
 
-        // 记入积分账本：只有确实算出增量时才记（gained 为 null 表示缺少快照，不写假数据）。
-        // 增量为 0 也不写 —— 账本里只应有真实发生的变动。
-        if (gained != null && gained != 0.0) {
-            store(context).recordCredit(account.key, "checkin", gained, if (already) "补记签到变动" else "每日签到")
+        // 记入积分账本。
+        //
+        // 行为变更（2026-10-29）：**签到成功就记一条**，即使差额是 0 或算不出来。
+        //
+        // 原逻辑是 `if (gained != null && gained != 0.0)` 才写 —— 后果是：
+        //   · 上游次日到账、或积分按批次发放时，差值是 0 → 不记账
+        //   · 签到后那次 refreshCredits 失败 → gained 为 null → 不记账
+        // 两种情况下界面显示「今日已签」，但「今日收支」里查无此项，
+        // 用户看到的就是「签到了但没计入收支」。
+        //
+        // 现在的语义是「记录签到这个事件及其可得的收益」：
+        //   · 算得出非零差额 → 记真实数额（与原来一致）
+        //   · 算出来是 0 或算不出 → 记 0，note 里说明情况
+        // 记 0 不会让收支数字虚高（求和加 0 无影响），但让「今天签到过」
+        // 这件事在账本里可见 —— 这比精确数额更重要。
+        val note = when {
+            already -> "补记签到变动"
+            gained == null -> "每日签到（到账数额未确认）"
+            gained == 0.0 -> "每日签到（上游未即时到账）"
+            else -> "每日签到"
         }
+        store(context).recordCredit(account.key, "checkin", gained ?: 0.0, note)
 
         return JSONObject()
             .put("uid", account.uid).put("account_key", account.key)

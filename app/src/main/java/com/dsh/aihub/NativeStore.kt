@@ -378,8 +378,16 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
      *
      * @param amount 正数=获得，负数=消耗；为 0 时不记账
      */
+    /**
+     * 记一笔积分变动（正=获得，负=消耗，0=事件本身值得留痕）。
+     *
+     * amount 允许为 0：签到这类"动作发生了但上游未即时到账"的情况，
+     * 记 0 不会影响收支求和，但能让「今天做过什么事」在账本里可见。
+     * 之前 `amount == 0.0` 直接 return false，导致界面显示「今日已签」
+     * 而收支里查无此项。
+     */
     fun recordCredit(accountKey: String, kind: String, amount: Double, note: String = ""): Boolean {
-        if (accountKey.isBlank() || amount == 0.0 || !amount.isFinite()) return false
+        if (accountKey.isBlank() || !amount.isFinite()) return false
         return writableDatabase.insert("credit_ledger", null, ContentValues().apply {
             put("account_key", accountKey); put("ts", nowSeconds())
             put("kind", kind); put("amount", amount); put("note", note)
