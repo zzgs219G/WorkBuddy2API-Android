@@ -10,9 +10,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.tween
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,6 +24,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -41,7 +46,6 @@ import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import android.content.Context
 import com.dsh.aihub.m3.AppM3Theme
-import com.dsh.aihub.m3.M3Icons
 import com.dsh.aihub.UpdateScreen
 import com.dsh.aihub.AboutScreen
 
@@ -52,7 +56,7 @@ import com.dsh.aihub.AboutScreen
  *   ① 底部导航从 Miuix NavigationBar 换成自建 Row（M3 的 NavigationBarItem
  *      会把每格撑到屏宽/6、固定 80dp 高，纯文字 Tab 显得太空旷）
  *   ② 顶栏从 SmallTopAppBar 换成 M3 CenterAlignedTopAppBar，返回按钮从文字变成图标
- *   ③ 图标从 MiuixIcons 换成 m3/M3Icons 内联图标集（零依赖、零资源）
+ *   ③ 图标用官方 material-icons-core（Icons.Filled.*）
  *   ④ 主题挂载点从 AppTheme（Miuix）换成 AppM3Theme
  *
  * 刻意保留的部分（原实现的判断仍然成立）：
@@ -72,20 +76,31 @@ import com.dsh.aihub.AboutScreen
  * 一级 Tab（底部导航）。
  */
 enum class AppTab(val label: String, val icon: ImageVector) {
-    OVERVIEW("概览", M3Icons.Overview),
-    ACCOUNTS("账号", M3Icons.Accounts),
-    MODELS("模型", M3Icons.Models),
-    APPS("应用", M3Icons.Apps),
-    SETTINGS("设置", M3Icons.Settings),
-    GROWTH("成长", M3Icons.Growth)
+    OVERVIEW("概览", Icons.Filled.Home),
+    ACCOUNTS("账号", Icons.Filled.Person),
+    APPS("应用", Icons.Filled.Build),
+    SETTINGS("设置", Icons.Filled.Settings),
+    GROWTH("成长", Icons.Filled.Star)
 }
-// 图标用 m3/M3Icons 的 7 个内联 ImageVector，不引入任何 icons 依赖：
-//   material-icons-extended 会给 APK 增加约 10MB（上万图标，本应用只需 7 个）；
-//   material-icons-core 只含约 20 个图标，且在本项目里仅由 Miuix 传递引入——
-//   脱离 Miuix 后该依赖也随之消失。内联 7 个 ImageVector 是零成本的确定解。
+// 底栏从 6 个减到 5 个：「模型」不再是独立 Tab。
+//
+// 理由：它是一个纯列表（225 行，内容就是筛选 + 列表），却占掉 1/6 的底栏。
+// 底栏位是全局最贵的资源 —— 换掉一个 Tab 意味着用户的空间记忆全部重建。
+// 模型清单属于「查看有哪些可选模型」，是从概览页模型数量点进去的动作，
+// 与「账号」「应用」这种需要长期切回来操作的对象不是一个量级。
+// 图标来源：官方 material-icons-core 的 Icons.Filled.*。
+//
+// 这里换过一次方案，记下原因避免反复：
+//   原先用手写 ImageVector（m3/M3Icons.kt，addPathNodes 解析 pathData 字符串），
+//   目的是省掉 material-icons-extended 的 10MB。但那套图标放进
+//   NavigationBarItem 的 icon 槽位后渲染不出来 —— 底栏只剩文字没有图标。
+//   手写 ImageVector 与官方 Icon 的兼容性风险，比省下的体积重要得多。
+//
+// 用 core 而不是 extended：core 只有约 40 个常用图标、约 800KB；
+// extended 是 2000+ 图标、35MB。本项目只需要 6 个。
 
 /** 二级页面（覆盖在 Tab 之上，带返回按钮）。 */
-enum class SubPage { NONE, USAGE, INSPECTOR, STORAGE, KEEPALIVE, PROMPT, RECORDS, SCHEDULE, UPDATE, ABOUT, QODER }
+enum class SubPage { NONE, USAGE, INSPECTOR, STORAGE, KEEPALIVE, PROMPT, RECORDS, SCHEDULE, UPDATE, ABOUT, QODER, MODELS, CONNECTIVITY }
 
 /**
  * 当前显示的页面标识。
@@ -110,6 +125,8 @@ private fun SubPage.title(): String = when (this) {
     SubPage.SCHEDULE -> "定时参数"
     SubPage.UPDATE -> "软件更新"
     SubPage.QODER -> "Qoder 协议验证"
+    SubPage.MODELS -> "模型目录"
+    SubPage.CONNECTIVITY -> "连通性自检"
     SubPage.ABOUT -> "关于"
     SubPage.NONE -> ""
 }
@@ -139,7 +156,7 @@ fun AppShell(context: Context, app: AppState) {
                         if (sub != SubPage.NONE) {
                             // 用文字「返回」而不是图标。
                             //
-                            // 之前用 M3Icons.Back 图标，用户反馈完全看不见（先怀疑纯黑
+                            // 之前用内联 ImageVector，用户反馈完全看不见（先怀疑纯黑
                             // tint，加了显式 tint 仍无效）。图标路径本身没问题 —— 和其他
                             // 能正常显示的图标结构一致 —— 所以问题很可能在
                             // CenterAlignedTopAppBar 对 navigationIcon 槽位的测量上。
@@ -192,42 +209,45 @@ fun AppShell(context: Context, app: AppState) {
                 AnimatedContent(
                     targetState = pageKey,
                     transitionSpec = {
-                        // 两页同为 tab 时按枚举序定方向；进出二级页按层级定方向：
-                        // 进去算前进（新页从右入），返回算后退（旧页从右出）。
+                        // 按"层级关系"分两种转场，不做统一处理：
                         //
-                        // 先落到局部变量：initialState/targetState 是带自定义 getter
-                        // 的属性，直接写 is 判断拿不到智能转换。
+                        //   Tab ↔ Tab   → 交叉淡化，无位移。
+                        //     同级页面之间切换没有"进入方向"可言，滑动反而会让
+                        //     用户以为页面有前后顺序。M3 的 NavigationBar 自己
+                        //     就带选中指示器动画，内容区只需要一个短淡化。
+                        //
+                        //   Tab ↔ 二级页 → 横向推入/退出。
+                        //     这是层级深入，滑动能表达"进去了一层"，返回时反向。
+                        //
+                        // 历史问题（都记下来避免再犯）：
+                        //   ① 曾给 Tab 也加位移，还叠加 fadeIn/fadeOut，两层同时跑
+                        //      → 观感是"整个屏幕在闪"。
+                        //   ② 去掉淡化只留位移，但时长 220ms 配 1/8 屏宽，单位时间
+                        //      位移过小 → 中间帧几乎没变化，观感是"卡住然后跳一下"。
+                        //   根因是把"同级切换"和"层级切换"用了同一套动画。
                         val from = initialState
                         val to = targetState
-                        val forward = when {
-                            from is PageKey.Tab && to is PageKey.Tab ->
-                                to.tab.ordinal >= from.tab.ordinal
-                            from is PageKey.Sub && to is PageKey.Sub -> true
-                            else -> to is PageKey.Sub
-                        }
-                        val dir = if (forward) 1 else -1
-                        // 只做位移，不叠透明度。
-                        //
-                        // 之前是「1/5 屏宽滑动 + fadeIn/fadeOut 同时跑」，两层动画
-                        // 叠加的结果是整块内容先变暗再变亮 —— 观感就是"整个屏幕在
-                        // 淡入淡出"、"闪一下"。位移本身已经表达了方向，淡入淡出
-                        // 在这里没有信息量，只会放大闪烁感。
-                        //
-                        // 曲线用 M3 的 emphasized 规格（快出慢入 + 轻微过冲），
-                        // 比默认 tween 的线性加减速更像系统级转场。
-                        // 位移收到 1/8 屏宽：短距离 + 快速曲线，观感是"内容滑入"
-                        // 而不是"整页重绘"。
-                        //
-                        // 注：曾尝试 MotionScheme.expressive()，但本项目实际解析到的
-                        // material3 版本里该 API 仍是 internal（Hub 用的是
-                        // 1.4.0-alpha18 才有公开签名）。这里改用等价的公开 API
-                        // 组合出同样的手感，不引入版本锁定风险。
-                        val spec: FiniteAnimationSpec<IntOffset> =
-                            tween(durationMillis = 220, easing = FastOutSlowInEasing)
-                        val enter = slideInHorizontally(animationSpec = spec) { width -> dir * width / 8 }
-                        val exit = slideOutHorizontally(animationSpec = spec) { width -> -dir * width / 8 }
-                        (enter togetherWith exit).apply {
-                            targetContentZIndex = if (forward) 1f else -1f
+                        val fromSub = from is PageKey.Sub
+                        val toSub = to is PageKey.Sub
+
+                        when {
+                            // 同级 Tab：纯淡化，短时长
+                            !fromSub && !toSub -> {
+                                fadeIn(tween(120)) togetherWith fadeOut(tween(90))
+                            }
+                            // 进出二级页：横向推入/退出 + 淡化
+                            else -> {
+                                val dir = if (toSub) 1 else -1
+                                val enter = slideInHorizontally(
+                                    animationSpec = tween(260, easing = FastOutSlowInEasing),
+                                ) { width -> dir * width / 4 } + fadeIn(tween(180))
+                                val exit = slideOutHorizontally(
+                                    animationSpec = tween(260, easing = FastOutSlowInEasing),
+                                ) { width -> -dir * width / 4 } + fadeOut(tween(120))
+                                (enter togetherWith exit).apply {
+                                    targetContentZIndex = if (toSub) 1f else -1f
+                                }
+                            }
                         }
                     },
                     // 高度用 weight 占满剩余空间，底栏不再由 Scaffold 的 bottomBar
@@ -243,6 +263,8 @@ fun AppShell(context: Context, app: AppState) {
                                 SubPage.STORAGE -> StorageScreen(context, app)
                                 SubPage.KEEPALIVE -> KeepAliveScreen(context, app)
                                 SubPage.QODER -> QoderScreen()
+                                SubPage.MODELS -> ModelsScreen(context, app)
+                                SubPage.CONNECTIVITY -> ConnectivityScreen(context, app)
                                 SubPage.PROMPT -> PromptScreen(context)
                                 SubPage.RECORDS -> RecordsScreen(context, app)
                                 SubPage.SCHEDULE -> ScheduleScreen(context, app)
@@ -255,7 +277,6 @@ fun AppShell(context: Context, app: AppState) {
                             is PageKey.Tab -> when (k.tab) {
                                 AppTab.OVERVIEW -> OverviewScreen(context, app) { sub = it }
                                 AppTab.ACCOUNTS -> AccountsScreen(context, app)
-                                AppTab.MODELS -> ModelsScreen(context, app)
                                 AppTab.APPS -> AppsScreen(context, app)
                                 AppTab.SETTINGS -> SettingsScreen(context, app) { sub = it }
                                 AppTab.GROWTH -> GrowthScreen(context, app.selectedAccount)
@@ -291,9 +312,8 @@ fun AppShell(context: Context, app: AppState) {
  *   现在 Tab 恢复成「图标 + 文字」的标准形态，纯文字被撑空的问题自然消失，
  *   不需要再靠自建布局来压缩空白。
  *
- * 图标说明：AppTab 的 ImageVector 仍来自 m3/M3Icons（手写 pathData）。
- *   NavigationBarItem 的 icon 槽位对 ImageVector 没有额外要求，能画出来即可；
- *   若某天确认 release 下不渲染，再换 material-icons 依赖，与本次布局改动无关。
+ * 图标说明：AppTab 的 ImageVector 来自官方 material-icons-core。
+ *   手写 ImageVector 在该槽位渲染不出来的问题已通过换官方图标解决。
  */
 @Composable
 private fun BottomBar(selected: AppTab, onSelect: (AppTab) -> Unit) {

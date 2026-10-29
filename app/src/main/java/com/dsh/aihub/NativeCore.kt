@@ -1053,6 +1053,43 @@ object NativeCore {
     fun recordCredit(context: Context, accountKey: String, kind: String, amount: Double, note: String = ""): Boolean =
         store(context).recordCredit(accountKey, kind, amount, note)
 
+    /**
+     * 今日各账号的积分收益汇总，供「成长」页顶部展示。
+     *
+     * 解决的是"任务做完了但不知道哪个号加了分"——原先只有执行当下的一行
+     * 文本，切页即消失，多账号时要逐个切过去对比余额。
+     *
+     * @return [{account_key, kind, total, count}]；account_key 已替换成可读昵称
+     */
+    fun todaysGains(context: Context): JSONArray {
+        val raw = store(context).creditGainsToday()
+        // 把 account_key（region:uid）换成可读的「昵称·短UID」。
+        // 保留 account_key 原值：调用方可能还要按它去跳转账号详情。
+        val nameByKey = runCatching {
+            val out = HashMap<String, String>()
+            val all = store(context).listAccounts()
+            for (i in 0 until all.length()) {
+                val a = all.optJSONObject(i) ?: continue
+                val region = a.optString("region", "domestic")
+                val uid = a.optString("uid")
+                if (uid.isBlank()) continue
+                out["$region:$uid"] = a.optString("nickname").ifBlank { uid.take(8) }
+            }
+            out
+        }.getOrDefault(emptyMap())
+
+        return JSONArray().apply {
+            for (i in 0 until raw.length()) {
+                val item = raw.optJSONObject(i) ?: continue
+                val key = item.optString("account_key")
+                put(
+                    item.put("label", nameByKey[key] ?: key.substringAfter(':').take(8))
+                        .put("note", if (item.optString("kind") == "task") "任务" else "签到/奖励")
+                )
+            }
+        }
+    }
+
     /** 清空某账号积分账本。 */
     fun clearCreditLedger(context: Context, accountKey: String): Int = store(context).clearCreditLedger(accountKey)
 

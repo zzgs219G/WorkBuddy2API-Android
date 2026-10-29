@@ -100,8 +100,16 @@ fun SettingsScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                     checked = app.settings.optString("relax_origin", "0") !in setOf("1", "true"),
                     onChange = { app.saveSetting("relax_origin", if (it) "0" else "1") }
                 )
-                // 保活与取证都回答同一个问题：「服务为什么不通」。
-                // 前者查系统限制，后者查上游请求，排查时是连续动作。
+                // 三件事回答同一个问题「为什么不通」，只是层次不同：
+                //   自检   → 现在到底哪一层坏了（本地 / 账号 / 上游），给出结论
+                //   保活   → 本地这一层为什么被系统限制
+                //   取证   → 上游这一层我们实际发了什么
+                // 排查时按这个顺序走，所以放在一起且自检在首位。
+                PcRow(
+                    title = "连通性自检",
+                    summary = "发一次最小请求，判断是本地、账号还是上游的问题",
+                    onClick = { onOpenSub(SubPage.CONNECTIVITY) }
+                )
                 PcRow(
                     title = "后台保活",
                     summary = "按厂商逐步放开限制，并检查漏项",

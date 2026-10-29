@@ -273,6 +273,100 @@ fun PcInfoRow(label: String, value: String) {
 }
 
 /**
+ * 一排等宽的指标块：大字号数值 + 小字号标签。
+ *
+ * 为什么需要它
+ * ------------
+ * 原先每个数字都占一整行「标签 : 值」：
+ *
+ *     账号            2 个
+ *     模型            18
+ *     全部剩余额度  7576 积分
+ *
+ * 问题有两个：
+ *   ① 标签列固定 96dp，加上值与行内边距，一半屏宽是空白；
+ *      六个数字就要 240dp 高度，而它们的信息量远不到这个尺寸。
+ *   ② 六个数字权重完全相同，用户看不出哪个该先看。
+ *
+ * 指标块的解法是把「同维度、同量级的小数字」横向排一行：数值放大到
+ * headlineSmall 建立视觉重心，标签降为 labelSmall，宽度等分。
+ * 一行放 3 个时，六个指标只需两行、约 110dp —— 密度上去，层次也有了。
+ *
+ * 适用边界：只放**短数值**（个数、积分数、次数）。
+ * 路径、Key、UID 这类长值不要塞进来 —— 它们需要逐字符比对，
+ * 塞进等分格子只会被截断，反而更难读，那些继续用 [PcInfoRow]。
+ */
+@Composable
+fun PcMetricRow(
+    items: List<Pair<String, String>>,
+    /** 第几项可点击（-1 表示都不可点）。可点项用主题色，暗示"点进去有内容"。 */
+    clickableIndex: Int = -1,
+    onClick: (() -> Unit)? = null,
+) {
+    if (items.isEmpty()) return
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+    ) {
+        items.forEachIndexed { index, (label, value) ->
+            val clickable = index == clickableIndex && onClick != null
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .then(if (clickable) Modifier.clip(RoundedCornerShape(8.dp)).clickable { onClick!!() } else Modifier)
+                    .padding(vertical = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = value,
+                    // headlineSmall(24sp)：指标是这一屏的视觉重心，
+                    // 用 bodyLarge 会和普通行的值分不出来。
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (clickable) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        // 不足 3 个时补占位，避免剩余两项被拉宽到与三项不同的密度
+        repeat(3 - items.size.coerceAtMost(3)) {
+            Spacer(Modifier.weight(1f))
+        }
+    }
+}
+
+/**
+ * 一行紧凑的「键 值 · 键 值」文本。
+ *
+ * 用于「同类别但凑不满一排」的零散指标：与其各占一整行，
+ * 不如压成一行小字。例如：
+ *
+ *     今日  8 次 · 12K tokens
+ *
+ * 之所以不做成指标块：这类值量级不一致（次数 vs tokens），
+ * 并排放大反而让人误以为可以直接比较。
+ */
+@Composable
+fun PcInlineFacts(parts: List<Pair<String, String>>) {
+    if (parts.isEmpty()) return
+    Text(
+        text = parts.joinToString("  ·  ") { (label, value) -> "$label $value" },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+/**
  * 可点击复制的信息行。
  *
  * 为什么做成"点值本身复制"而不是旁边放一个按钮：

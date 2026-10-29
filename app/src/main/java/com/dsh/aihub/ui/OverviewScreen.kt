@@ -70,17 +70,22 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                     )
                 }
                 Spacer(Modifier.height(PcTokens.SpaceS))
-                // 服务运行中展示「实际能连的地址」：开了局域网就是手机 IP，
-                // 否则是回环地址。固定写 127.0.0.1 会让用户在电脑上填了连不通。
+                // 两种地址都给，因为它们各自的适用场景不同，缺一都会让人连不通：
+                //
+                //   127.0.0.1  → 只有**手机本机**的 App 能用。填到电脑上无效，
+                //                因为 127.0.0.1 在电脑上指的是电脑自己。
+                //   192.168.x  → **同局域网的其它设备**（电脑/平板）必须用这个。
+                //
+                // 之前开局域网后只显示 192 版，手机上其它 App 反而拿不到回环地址；
+                // 更早则固定只显示 127，电脑上填了永远连不通。
                 val lanEnabled = app.settings.optString("lanAccess", "0") in setOf("1", "true")
                 val lanEntry = remember(lanEnabled) { if (lanEnabled) LanAddress.primary() else null }
-                val baseUrl = LanAddress.baseUrl(ApiHostService.PORT, lanEntry)
+                val loopbackUrl = "http://127.0.0.1:${ApiHostService.PORT}/v1"
                 Text(
                     when {
-                        running && lanEntry != null ->
-                            "OpenAI 兼容地址（局域网 · ${lanEntry.address}）"
-                        running -> "OpenAI 兼容地址"
                         starting -> "正在校验账号并预热模型，通常数秒内完成；若长时间无变化，请检查通知权限。"
+                        running && lanEntry != null -> "本机与局域网都可调用"
+                        running -> "仅本机可调用（局域网未开启）"
                         else -> "启动后仅在本机提供 OpenAI 兼容 API。"
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -88,45 +93,78 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                 )
                 // 运行中才显示可复制的地址：没启动时复制一个连不通的地址没有意义。
                 if (running) {
-                    PcCopyableRow("baseUrl", baseUrl) {
+                    PcCopyableRow("本机地址", loopbackUrl) {
                         copyToClipboard(context, it)
-                        app.showMessage("已复制 Base URL：$it")
+                        app.showMessage("已复制本机地址：$it")
+                    }
+                    if (lanEntry != null) {
+                        PcCopyableRow("局域网地址", LanAddress.baseUrl(ApiHostService.PORT, lanEntry)) {
+                            copyToClipboard(context, it)
+                            app.showMessage("已复制局域网地址：$it")
+                        }
                     }
                 }
                 Spacer(Modifier.height(PcTokens.SpaceM))
-                PcActionGrid(
-                    actions = listOf(
+                // 两个都是页面级操作，都放在顶部这张卡里。
+                //
+                // 「刷新全部」原先被放在页面最底部的一张「开始使用」卡里，
+                // 于是每次刷新都要先滚到最下面 —— 而它是这个页面最高频的动作。
+                // 页面级主操作应该在第一屏可见处。
+                Row(horizontalArrangement = Arrangement.spacedBy(PcTokens.SpaceS)) {
+                    TextButton(
                         // 启动中仍可点「停止」：若陷入启动异常（如上游卡住），
                         // 用户必须有办法中止，否则只能杀进程 —— 此前 disabled = !starting
                         // 会把按钮锁死，是"反复启停后再也停不掉"的观感来源之一。
-                        // 复制按钮已并入上面的可点击行，这里只留启停这一个主操作。
-                        PcAction(
-                            when {
-                                running -> "停止服务"
-                                starting -> "取消启动"
-                                else -> "启动服务"
-                            },
-                            primary = true
-                        ) { app.toggleServer(activity) }
-                    )
-                )
+                        onClick = { app.toggleServer(activity) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text(when { running -> "停止服务"; starting -> "取消启动"; else -> "启动服务" }) }
+                    TextButton(
+                        onClick = { app.refreshAll() },
+                        enabled = !app.busy,
+                        modifier = Modifier.weight(1f)
+                    ) { Text(if (app.busy) "刷新中…" else "刷新全部") }
+                }
             }
         }
 
         // ---------------- 快速概览 ----------------
+        //
+        // 布局从「六行标签:值」改为「一排指标块 + 一行零散指标」。
+        //
+        // 原来的六行各占一整行、标签列固定 96dp，一半屏宽是空白，且六个数字
+        // 权重完全相同 —— 既浪费垂直空间，也建立不起主次。
+        //
+        // 现在按「用户最关心什么」分两层：
+        //   · 第一层（指标块）：剩余积分 / 模型数 / 账号数。这三个决定了
+        //     "还能不能用、能用多少"，是打开 App 第一眼要看的。
+        //   · 第二层（一行小字）：今日请求与 Tokens。它们量级不同（次数 vs tokens），
+        //     并排放大反而会被误以为可直接比较，压成一行小字更合适。
+        //   · 运行记录条数从概览移走 —— 那是调试信息，出现频率低，
+        //     需要时去「记录」页看即可。
         item {
             PcCard(title = "快速概览") {
                 val creditKnown = app.credits?.optInt("known") ?: 0
-                PcInfoRow("账号", app.accounts.length().let { if (it == 0) "0（待配置）" else "$it 个" })
-                PcInfoRow("模型", app.models?.length()?.toString() ?: "未刷新")
-                PcInfoRow(
-                    "全部剩余额度",
-                    if (creditKnown > 0) "${FormatKit.credits(app.credits?.optDouble("remain") ?: 0.0)} 积分"
-                    else "未刷新"
+                PcMetricRow(
+                    listOf(
+                        "剩余积分" to
+                            if (creditKnown > 0) FormatKit.credits(app.credits?.optDouble("remain") ?: 0.0)
+                            else "—",
+                        "模型" to (app.models?.length()?.toString() ?: "—"),
+                        "账号" to app.accounts.length().toString(),
+                    ),
+                    // 「模型」这一项可点：模型清单不再是独立 Tab，从这里进入。
+                    // 其余两项不可点 —— 积分没有更细的页面，账号数量对应的是
+                    // 隔壁 Tab 已经能直接到达的地方，重复入口反而增加困惑。
+                    clickableIndex = 1,
+                    onClick = { onOpenSub(SubPage.MODELS) },
                 )
-                PcInfoRow("运行记录", "${app.events.size} 条")
-                PcInfoRow("今日请求", FormatKit.tokens(app.usageSummary?.optLong("today_requests") ?: 0))
-                PcInfoRow("今日 Tokens", FormatKit.tokens(app.usageSummary?.optLong("today_tokens") ?: 0))
+                Spacer(Modifier.height(PcTokens.SpaceM))
+                PcInlineFacts(
+                    listOf(
+                        "今日" to "${FormatKit.tokens(app.usageSummary?.optLong("today_requests") ?: 0)} 次",
+                        "Tokens" to FormatKit.tokens(app.usageSummary?.optLong("today_tokens") ?: 0),
+                    )
+                )
             }
         }
 
@@ -169,34 +207,6 @@ fun OverviewScreen(context: Context, app: AppState, onOpenSub: (SubPage) -> Unit
                         )
                     }
                 }
-            }
-        }
-
-        // ---------------- 开始使用 ----------------
-        item { SectionTitle(text = "开始使用") }
-        item {
-            PcCard {
-                val first = app.accounts.optJSONObject(0)
-                Text(
-                    if (first == null) "连接 WorkBuddy 账号" else "${first.optString("nickname", "账号")} 已就绪",
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Spacer(Modifier.height(PcTokens.SpaceS / 2))
-                Text(
-                    if (first == null) "先登录或导入 auth 文件，再启动本地服务。"
-                    else "可直接启动服务，或刷新额度和模型目录。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(PcTokens.SpaceM))
-                PcActionGrid(
-                    actions = listOf(
-                        PcAction(if (app.busy) "刷新中…" else "刷新全部", primary = true, enabled = !app.busy) {
-                            app.refreshAll()
-                        },
-                        PcAction("用量统计") { onOpenSub(SubPage.USAGE) }
-                    )
-                )
             }
         }
 

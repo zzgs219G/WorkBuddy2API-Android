@@ -361,6 +361,46 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
         }) != -1L
     }
 
+    /**
+     * 今日各账号通过任务/签到获得的积分汇总。
+     *
+     * 为什么需要它：任务执行完只会在界面上留下一行会消失的文本
+     * （GrowthRunner 算完差值就 return 了），切走再回来看不到。
+     * 多账号场景下更麻烦 —— 用户不知道"是哪个号加了分、加了多少"，
+     * 只能一个个切账号去对比余额。这个查询把结果变成可回看的聚合。
+     *
+     * 只统计正向收益（kind = task / checkin / reward，amount > 0）：
+     * 消耗类（consume）是调用扣费，不属于"今天赚了多少"，混进来会让
+     * 用户误以为任务白做了。
+     *
+     * @return [{account_key, kind, total, count}]，按 total 降序
+     */
+    fun creditGainsToday(): JSONArray = run {
+        val out = JSONArray()
+        // 今日零点在本类内部算：时区/日期逻辑只留一处，
+        // 避免调用方各写一遍 DateFormat 而出现跨时区不一致。
+        val since = localMidnight()
+        readableDatabase.rawQuery(
+            """SELECT account_key, kind, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM credit_ledger
+               WHERE ts >= ? AND amount > 0 AND kind IN ('task','checkin','reward')
+               GROUP BY account_key, kind
+               ORDER BY total DESC""",
+            arrayOf(since.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.put(
+                    JSONObject()
+                        .put("account_key", c.getString(0))
+                        .put("kind", c.getString(1))
+                        .put("total", c.getDouble(2))
+                        .put("count", c.getInt(3))
+                )
+            }
+        }
+        out
+    }
+
     /** 某账号的积分明细（倒序，最新在前）。 */
     fun creditLedger(accountKey: String, limit: Int = 200): JSONArray = run {
         val out = JSONArray()

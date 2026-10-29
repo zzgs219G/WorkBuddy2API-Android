@@ -3,6 +3,7 @@ package com.dsh.aihub.ui
 import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,10 +22,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.dsh.aihub.GrowthFacade
+import com.dsh.aihub.NativeCore
 import com.dsh.aihub.m3.SectionTitle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -52,10 +55,19 @@ fun GrowthScreen(context: Context, accountKey: String?) {
     var statusText by remember { mutableStateOf("") }
     var logs by remember { mutableStateOf<List<String>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 今日各账号收益。空数组表示今天还没收益（或账本里没记录）。
+    var gains by remember { mutableStateOf<org.json.JSONArray>(org.json.JSONArray()) }
 
     fun refresh() {
         val key = accountKey ?: return
         scope.launch {
+            // 今日收益独立于任务列表加载：它是跨账号的本地账本聚合，
+            // 与当前选中账号的任务数据无关，所以即使任务接口失败也要显示。
+            scope.launch {
+                withContext(Dispatchers.IO) {
+                    runCatching { NativeCore.todaysGains(context) }
+                }.onSuccess { gains = it }
+            }
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val s = GrowthFacade.summary(context, key)
@@ -125,6 +137,69 @@ fun GrowthScreen(context: Context, accountKey: String?) {
         contentPadding = PaddingValues(top = PcTokens.SpaceM, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(PcTokens.CardGap)
     ) {
+        // ---------------- 今日收益（按账号） ----------------
+        //
+        // 解决的核心问题：任务做完后，用户不知道「到底加了多少分、加在哪个号上」。
+        // 改动前只有执行当下的一行文本（GrowthRunner 算完差值就 return），
+        // 切走再回来就没了；多账号时更麻烦，得逐个切账号对比余额才知道谁加了分。
+        //
+        // 这里读的是本地 credit_ledger（GrowthRunner 已在写 kind="task"），
+        // 所以不依赖任务接口是否成功 —— 即使上游挂了，历史收益照样看得到。
+        item {
+            PcCard(title = "今日收益") {
+                if (gains.length() == 0) {
+                    Text(
+                        "今天还没有收益记录。执行下方任务或签到后，这里会按账号列出到账金额。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    // 按账号合并：同一账号可能有 task / checkin 多条，先求和再展示，
+                    // 否则一个号会重复出现两行，看不出是同一个号。
+                    val byAccount = linkedMapOf<String, Double>()
+                    for (i in 0 until gains.length()) {
+                        val g = gains.optJSONObject(i) ?: continue
+                        val label = g.optString("label")
+                        byAccount[label] = (byAccount[label] ?: 0.0) + g.optDouble("total")
+                    }
+                    val total = byAccount.values.sum()
+                    PcMetricRow(
+                        listOf(
+                            "今日合计" to "+${"%.1f".format(total)}",
+                            "涉及账号" to byAccount.size.toString(),
+                        )
+                    )
+                    Spacer(Modifier.height(PcTokens.SpaceS))
+                    byAccount.entries.forEach { (label, amount) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                label,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "+${"%.1f".format(amount)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(PcTokens.SpaceS / 2))
+                    Text(
+                        "明细见「账号」页 → 积分详情",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
         // ---------------- 今日可领 ----------------
         item {
             PcCard(title = "今日可领") {

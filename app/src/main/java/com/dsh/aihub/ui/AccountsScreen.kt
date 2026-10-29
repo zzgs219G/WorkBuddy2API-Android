@@ -7,6 +7,7 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,6 +17,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -383,51 +386,98 @@ private fun AccountCard(
     var showPriority by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
 
-    PcCard(insideMargin = PaddingValues(horizontal = PcTokens.SpaceL, vertical = PcTokens.SpaceM)) {
+    // 账号卡片 —— 从「4 个信息行 + 5 个按钮」压到「2 行信息 + 1 行操作」。
+    //
+    // 改前一张卡约 300dp 高，一屏（约 640dp 可用）连两个账号都放不下，
+    // 而卡片里 60% 的空间被 5 个等宽按钮占着 —— 那些操作里只有「积分详情」
+    // 是高频的，其余（优先级 / 导出 / 删除）都是低频配置动作。
+    //
+    // 现在按「一眼要判断什么」组织：
+    //   第一行：昵称 + 状态徽标（这个号能不能用）
+    //   第二行：额度 + 签到状态 + 地区（还能用多少、今天领了没）
+    //   第三行：主操作（积分详情）+ 溢出菜单（其余低频动作）
+    // UID 从独立行收进副标题：它只在核对账号时才需要，完整的可在详情里看。
+    val isInternational = AccountRegion.from(account.optString("region")) == AccountRegion.INTERNATIONAL
+    val checkedIn = isCheckedInToday(account.optString("last_checkin_date"))
+    var menuOpen by remember { mutableStateOf(false) }
+
+    PcCard(insideMargin = PaddingValues(horizontal = PcTokens.SpaceL, vertical = PcTokens.SpaceS)) {
         Column {
+            // ── 第一行：昵称 + 状态 ──
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text(nickname, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                Text(
+                    nickname,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
                 Text(
                     when {
+                        !enabled -> "已停用"
                         healthy -> "● 健康"
-                        enabled -> "冷却"
-                        else -> "已停用"
+                        else -> "冷却中"
                     },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    style = MaterialTheme.typography.labelSmall,
+                    color = when {
+                        !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                        healthy -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.error
+                    }
                 )
             }
+            Spacer(Modifier.height(2.dp))
+            // ── 第二行：额度 · 签到 · 地区 ──
+            // 三个短事实压成一行小字，不再各占一整行。
+            Text(
+                buildList {
+                    add(
+                        if (account.isNull("credits_remaining")) "额度未刷新"
+                        else "${FormatKit.credits(account.optDouble("credits_remaining"))} 积分"
+                    )
+                    add(
+                        when {
+                            isInternational -> "自动发放"
+                            checkedIn -> "今日已签"
+                            else -> "今日未签"
+                        }
+                    )
+                    add(account.optString("region_label", "国内版"))
+                    add("UID ${FormatKit.shortUid(uid)}")
+                }.joinToString("  ·  "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
             Spacer(Modifier.height(PcTokens.SpaceS))
-            PcInfoRow("版本", account.optString("region_label", "国内版"))
-            // UID 用等宽 + 固定标签列宽：此前用 PcInfoRow 的权重布局，短标签 "UID"
-            // 被长值挤成逐字竖排（截图可见 U/I/D 三行）。
-            PcMonoRow("UID", uid)
-            PcInfoRow("优先级", "${account.optInt("priority")}（权重 ×${account.optInt("priority") + 1}）")
-            PcInfoRow(
-                "剩余 / 总额度",
-                if (account.isNull("credits_remaining")) "尚未刷新"
-                else "${FormatKit.credits(account.optDouble("credits_remaining"))} / ${FormatKit.credits(account.optDouble("credits_total"))} 积分"
-            )
-            val isInternational = AccountRegion.from(account.optString("region")) == AccountRegion.INTERNATIONAL
-            PcInfoRow(
-                if (isInternational) "额度发放" else "今日签到",
-                if (isInternational) "自动发放 · 刷新额度即可"
-                else if (isCheckedInToday(account.optString("last_checkin_date"))) "已签到" else "未签到"
-            )
-            Spacer(Modifier.height(PcTokens.SpaceM))
-            // 统一走 PcActionGrid：等宽、按钮间有固定间距、奇数个自动折行且不拉伸。
-            // 「积分详情」放首位并作为主按钮：按账号核对积分来源是高频需求。
-            PcActionGrid(
-                actions = listOf(
-                    PcAction("积分详情", primary = true) { onShowCredits() },
-                    PcAction(if (enabled) "停用" else "启用") {
-                        app.setAccountEnabled(accountKey, !enabled)
-                    },
-                    PcAction("优先级") { showPriority = true },
-                    PcAction("导出") { onExport() },
-                    PcAction("删除账号") { showDelete = true }
-                )
-            )
+            // ── 第三行：主操作 + 溢出菜单 ──
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                TextButton(onClick = onShowCredits) { Text("积分详情") }
+                Spacer(Modifier.weight(1f))
+                Box {
+                    TextButton(onClick = { menuOpen = true }) { Text("更多") }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text(if (enabled) "停用账号" else "启用账号") },
+                            onClick = { menuOpen = false; app.setAccountEnabled(accountKey, !enabled) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("设置优先级") },
+                            onClick = { menuOpen = false; showPriority = true }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("导出凭证") },
+                            onClick = { menuOpen = false; onExport() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("删除账号", color = MaterialTheme.colorScheme.error) },
+                            onClick = { menuOpen = false; showDelete = true }
+                        )
+                    }
+                }
+            }
         }
     }
 

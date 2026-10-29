@@ -231,6 +231,16 @@ dependencies {
     // ---- 单元测试（JVM，不跑设备）----
     // 只用于纯逻辑：失败分类、协议转换这类「写错了不会崩、只会静默给出错误结论」
     // 的函数。当前覆盖 FailureDiagnosis（见 app/src/test）。
+    // 官方图标库（core 版，约 800KB / 40 个常用图标）。
+    //
+    // 为什么需要它：项目原先是手写 ImageVector（m3/M3Icons.kt，用 addPathNodes
+    // 解析 pathData 字符串），目的是省掉 material-icons-extended 的 10MB。
+    // 但手写版在 NavigationBar 的 icon 槽位里渲染不出来（只有文字、没有图标），
+    // 排查成本远高于省下的体积。core 版只含常用图标且只有 800KB，引它是划算的。
+    //
+    // 不用 extended：那是 35MB / 2000+ 图标，本项目只需 6 个。
+    implementation("androidx.compose.material:material-icons-core:1.7.8")
+
     testImplementation("junit:junit:4.13.2")
     // org.json 在 Android 单元测试里是 stub（方法全抛 RuntimeException），
     // 必须给 JVM 侧一份真实实现，否则任何碰 JSONObject 的用例都会挂。
