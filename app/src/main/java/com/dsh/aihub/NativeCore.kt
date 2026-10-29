@@ -1135,7 +1135,17 @@ object NativeCore {
         // ②③ 本地账本
         result.put("ledger_summary", store(context).creditLedgerSummary(accountKey))
         result.put("ledger", store(context).creditLedger(accountKey, ledgerLimit))
-        result.put("last_checkin_date", account?.root?.optString("last_checkin_date").orEmpty())
+        // last_checkin_date 是 accounts 表的顶层列（rowJson 直接映射），
+        // 不在 auth_json 里 —— 所以必须读 store 的行记录，不能读 account.root。
+        //
+        // 改动前写的是 account?.root?.optString("last_checkin_date")，root 是
+        // auth_json 解析出来的对象，里面根本没这个字段，永远返回空串
+        // → 积分详情永远显示「未签到」，而账号卡读的是行记录，显示「已签到」。
+        // 这就是「两处签到状态不一致」的根因。
+        result.put(
+            "last_checkin_date",
+            store(context).getAccount(accountKey)?.optString("last_checkin_date").orEmpty()
+        )
         return result
     }
 

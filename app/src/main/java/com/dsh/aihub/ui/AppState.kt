@@ -123,14 +123,29 @@ class AppState(private val context: Context) {
         if (busy) return
         busy = true
         scope.launch {
-            val result = runCatching { block() }
-            withContext(Dispatchers.Main) {
-                result.fold(
-                    onSuccess = { record("$name：$it") },
-                    onFailure = { record("$name 失败：${it.message ?: it.javaClass.simpleName}") }
-                )
+            // busy 必须用 try/finally 复位，不能只放在 runCatching 之后。
+            //
+            // 原来的写法是：
+            //     val result = runCatching { block() }
+            //     withContext(Main) { ...; busy = false }
+            // 只要 withContext 本身抛出（协程被取消 —— 比如 Activity 重建导致
+            // scope 的 Job 取消、或者界面已销毁），busy 就永远停在 true，
+            // 界面上所有读 busy 的按钮永久显示「刷新中…」且不可点。
+            // 这正是「刷新按钮一直卡在刷新中」的来源。
+            try {
+                val result = runCatching { block() }
+                withContext(Dispatchers.Main) {
+                    result.fold(
+                        onSuccess = { record("$name：$it") },
+                        onFailure = { record("$name 失败：${it.message ?: it.javaClass.simpleName}") }
+                    )
+                    bump()
+                }
+            } finally {
+                // 即使上面抛了 CancellationException 也要复位。
+                // 这里直接写 state，不走 withContext：CancellationException 之后
+                // 再挂起会被立刻取消掉，withContext 反而执行不到。
                 busy = false
-                bump()
             }
         }
     }

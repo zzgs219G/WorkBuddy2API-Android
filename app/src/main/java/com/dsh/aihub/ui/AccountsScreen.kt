@@ -429,12 +429,34 @@ private fun AccountCard(
             }
             Spacer(Modifier.height(2.dp))
             // ── 第二行：额度 · 签到 · 地区 ──
-            // 三个短事实压成一行小字，不再各占一整行。
+            // 几个短事实压成一行小字，不再各占一整行。
+            //
+            // 额度后面带上本次签到增量：用户最直接的疑问是「签到了到底加没加额度」，
+            // 光看「今日已签」答不了这个问题。增量来自 checkinResults 里同一账号的
+            // credits_gained（NativeCore.checkIn 用签到前后余额快照算出来的真实差额）。
+            val gainedToday = remember(app.checkinResults, accountKey) {
+                var value: Double? = null
+                val results = app.checkinResults
+                if (results != null) {
+                    for (i in 0 until results.length()) {
+                        val item = results.optJSONObject(i) ?: continue
+                        if (item.optString("account_key") == accountKey && !item.isNull("credits_gained")) {
+                            value = item.optDouble("credits_gained", 0.0)
+                            break
+                        }
+                    }
+                }
+                value
+            }
             Text(
                 buildList {
+                    val base = if (account.isNull("credits_remaining")) "额度未刷新"
+                    else "${FormatKit.credits(account.optDouble("credits_remaining"))} 积分"
+                    // 只在确实算出差额且非 0 时附加，避免出现 "(+0.0)" 这种噪音
                     add(
-                        if (account.isNull("credits_remaining")) "额度未刷新"
-                        else "${FormatKit.credits(account.optDouble("credits_remaining"))} 积分"
+                        if (gainedToday != null && gainedToday != 0.0) {
+                            "$base（今日 ${if (gainedToday > 0) "+" else ""}${"%.1f".format(gainedToday)}）"
+                        } else base
                     )
                     add(
                         when {
@@ -444,6 +466,10 @@ private fun AccountCard(
                         }
                     )
                     add(account.optString("region_label", "国内版"))
+                    // 优先级必须露出来：它直接决定选号顺序（权重 ×(n+1)），
+                    // 是"为什么总是这个号在被用"的唯一解释。收进菜单会让人
+                    // 找不到原因 —— 之前压缩卡片时我把它藏起来了，是错的。
+                    add("优先级 ${account.optInt("priority")}")
                     add("UID ${FormatKit.shortUid(uid)}")
                 }.joinToString("  ·  "),
                 style = MaterialTheme.typography.bodySmall,
@@ -471,12 +497,28 @@ private fun AccountCard(
                             text = { Text("导出凭证") },
                             onClick = { menuOpen = false; onExport() }
                         )
-                        DropdownMenuItem(
-                            text = { Text("删除账号", color = MaterialTheme.colorScheme.error) },
-                            onClick = { menuOpen = false; showDelete = true }
-                        )
+                        // 「删除账号」刻意不放在这个菜单里。
+                        //
+                        // 菜单是「停用/优先级/导出」这类可逆或低风险动作的集合，
+                        // 删除是不可逆的。混在一起会有两个问题：
+                        //   ① 误触：菜单项之间只隔一行，手指滑一下就可能点到
+                        //   ② 语义混乱：删号不该看起来和"导出"是同一类操作
+                        // 现在它单独放在卡片底部，与上方内容用分隔线隔开。
                     }
                 }
+            }
+            // ── 删除：独立区域 + 分隔线 + 明显的水平间距 ──
+            //
+            // 三重隔离都是为了防误触：
+            //   ① 分隔线把「可逆操作区」和「不可逆操作区」在视觉上切开
+            //   ② 上下各留 SpaceS，手指从上方滑下来不会直接落在它身上
+            //   ③ 靠左对齐且不用主题色填充（只是文字色为 error），
+            //      不做成醒目的实心按钮 —— 危险操作不该是视觉焦点
+            Spacer(Modifier.height(PcTokens.SpaceS))
+            PcDivider()
+            Spacer(Modifier.height(PcTokens.SpaceS / 2))
+            TextButton(onClick = { showDelete = true }) {
+                Text("删除账号", color = MaterialTheme.colorScheme.error)
             }
         }
     }
