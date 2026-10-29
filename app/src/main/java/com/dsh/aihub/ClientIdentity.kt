@@ -137,19 +137,75 @@ object ClientIdentity {
     )
 
     /**
+     * `X-Product` 的正确取值：官方 product.json 的 deploymentType，**不是** productName。
+     *
+     * 此前这里发的是 PRODUCT_NAME（"CodeBuddy"），是把两个不同字段混用了：
+     * `X-Product` 表达的是「部署形态」（SaaS / Cloud-Hosted / Self-Hosted），
+     * 而 "CodeBuddy" 是 productName，只在 UA 的第二段出现。
+     * 官方 CLI 的 deploymentType = "SaaS"，所以 X-Product 恒为 "SaaS"。
+     *
+     * 一个「X-Product 填产品名」的客户端，在产品自身的枚举里根本不存在 ——
+     * 这是比 UA 更硬的破绽，且国内出口不校验、国际出口校验，表现为
+     * 「国内能用、国际版回 400 渠道校验」。
+     */
+    const val DEPLOYMENT_TYPE = "SaaS"
+
+    /** 官方 CLI 主对话的 X-Agent-Purpose（getCustomHeaders 固定值）。 */
+    const val AGENT_PURPOSE = "conversation"
+
+    /** 官方 CLI 的 X-Agent-Runtime：无 session meta 覆盖时的默认枚举值 "other"。 */
+    const val AGENT_RUNTIME = "other"
+
+    /**
+     * 官方 CLI 的 X-Stainless-Timeout（秒）。
+     *
+     * OpenAI Node SDK 只在调用方显式传 timeout 时才发这个头，官方 CLI 确实传了
+     * （1200s，即流式对话的长超时），所以线上每一笔 CLI 对话都带它。
+     * 此前本实现按「官方未设」处理而不发，属于把 SDK 的默认行为当成了实际行为。
+     */
+    const val STAINLESS_TIMEOUT = "1200"
+
+    /**
      * 识别头：标记本请求来自官方 CLI 插件。
      *
      * 官方 CLI 在头常量表里定义了 X-Product / X-Product-Version / X-IDE-Type /
      * X-IDE-Version，这些是上游识别客户端形态的直接依据。补齐它们，
      * 上游看到的才是「CodeBuddy CLI 插件」而不是「无产品标识的裸 HTTP 客户端」。
+     *
+     * ⚠️ 按版本分流（2026-10-29）：国际出口的渠道校验比国内严，官方 CLI 的
+     * X-Product / X-Agent-Purpose / X-Agent-Runtime 缺一个就会被判非官方渠道
+     * （400 / code 11128）。国内出口当前不校验这几项，且已有大量在用实例，
+     * 故只为国际版补齐，国内版维持原样、不做无谓改动。
+     *
+     * @param region 账号所属版本（决定是否按官方 CLI 全量身份发送）
      */
-    fun pluginHeaders(): Map<String, String> = mapOf(
-        "X-Product" to PRODUCT_NAME,
-        "X-Product-Version" to CLI_VERSION,
-        "X-IDE-Type" to PLATFORM,
-        "X-IDE-Name" to PLATFORM,
-        "X-IDE-Version" to CLI_VERSION
-    )
+    fun pluginHeaders(region: AccountRegion): Map<String, String> {
+        val headers = mutableMapOf(
+            "X-Product-Version" to CLI_VERSION,
+            "X-IDE-Type" to PLATFORM,
+            "X-IDE-Name" to PLATFORM,
+            "X-IDE-Version" to CLI_VERSION
+        )
+        if (region == AccountRegion.INTERNATIONAL) {
+            headers["X-Product"] = DEPLOYMENT_TYPE
+            headers["X-Agent-Purpose"] = AGENT_PURPOSE
+            headers["X-Agent-Runtime"] = AGENT_RUNTIME
+        } else {
+            headers["X-Product"] = PRODUCT_NAME
+        }
+        return headers
+    }
+
+    /**
+     * X-Private-Data：官方 getCustomHeaders 的默认值。
+     *
+     * 取值规则（官方语义）：先按「模型优化」开关写 true/false，个人号默认 false、
+     * 企业号默认 true；随后策略层只在自定义模型/skip 时删头。网关没有优化开关，
+     * 故按是否企业号取对应默认值。
+     *
+     * 这个头只在非国内站发（官方按 endpoint 判断），所以调用方必须按 region 决定是否加。
+     */
+    fun privateDataHeader(enterpriseId: String): String = if (enterpriseId.isBlank()) "false" else "true"
 
     /**
      * OpenAI Node SDK 的 X-Stainless-* 指纹头 —— 官方 CLI 每一笔对话请求都会自动带上。
@@ -182,10 +238,13 @@ object ClientIdentity {
      *                        发 "unknown" 反而可疑，故固定为一个真实版本串。
      *
      * 官方【不会】发的头，这里也一律不发：
-     *   - X-Stainless-Timeout        仅当调用方显式传 timeout 时才有，官方未设
      *   - X-Stainless-Helper-Method  仅 .stream()/.runTools() 等 helper 内部使用
      *   - X-Stainless-Poll-Helper / X-Stainless-Custom-Poll-Interval  仅轮询场景
      *   - OpenAI-Organization / OpenAI-Project  默认 null，被 SDK 剔除
+     *
+     * 特例：X-Stainless-Timeout **要发**。SDK 确实只在调用方显式传 timeout 时
+     * 才注入它，但官方 CLI 是显式传了 1200s 的，所以线上 CLI 对话每一笔都带。
+     * 此前按「调用方未设 timeout」理解而不发，是把 SDK 默认值当成了实际值。
      */
     fun stainlessHeaders(): Map<String, String> = mapOf(
         "X-Stainless-Lang" to "js",
@@ -194,7 +253,8 @@ object ClientIdentity {
         "X-Stainless-Arch" to STAINLESS_ARCH,
         "X-Stainless-Runtime" to "node",
         "X-Stainless-Runtime-Version" to STAINLESS_RUNTIME_VERSION,
-        "X-Stainless-Retry-Count" to "0"
+        "X-Stainless-Retry-Count" to "0",
+        "X-Stainless-Timeout" to STAINLESS_TIMEOUT
     )
 
     /**
@@ -219,20 +279,78 @@ object ClientIdentity {
      *
      * 官方在该函数中【条件发送】的头，我们一律不发（反代场景不成立）：
      *   - X-Agent-Purpose        仅在 PERSONAL_AGENT_ROLE 或 session.agentPurpose 存在时发
-     *   - X-Root-Request-ID      仅在 meta.rootRequestId 为非空字符串时发
      *   - X-Parent-Conversation-ID 仅在 meta.parentConversationId 有效时发
      *   - X-Session-ID           官方常量表中虽声明，但全 dist 无任何赋值/发送点
      *                            （仅出现在反向清空的白名单里），属死常量，绝不能发。
+     *   - X-Root-Request-ID      官方在 meta.rootRequestId 有效时才发；本实现按
+     *                            CLI 身份的官方结构恒发（值 = 本轮 request id），见
+     *                            函数内对 requestId 的说明。
      *
      * @param conversationId 会话 ID（UUIDv4，带连字符），须按账号分别持久化
      * @param messageId 本条消息 ID（UUIDv7，32 位无连字符）
+     * @param turnRequestId 本轮请求 ID（UUIDv7，32 位无连字符）。
+     *   官方在「一次 user send」开始时生成一个，该轮所有请求与重试复用同一个值。
+     *   传空串时退回成 messageId —— 仍是一个合法 id，绝不能发空串（见下）。
      */
-    fun conversationHeaders(conversationId: String, messageId: String): Map<String, String> = mapOf(
-        "X-Conversation-ID" to conversationId,
-        "X-Conversation-Request-ID" to "",
-        "X-Conversation-Message-ID" to messageId,
-        "X-Request-ID" to messageId,
-        "X-Agent-Intent" to "craft",
-        "X-Agent-Type" to "main"
-    )
+    fun conversationHeaders(
+        conversationId: String,
+        messageId: String,
+        turnRequestId: String = ""
+    ): Map<String, String> {
+        // 为什么不能发空串：HTTP 头值为空时 OkHttp/上游都会把它当「缺失」，
+        // 而官方 CLI 的 X-Conversation-Request-ID 恒有值。发空串等于既没给
+        // 会话上下文、又多了一个「声称自己是 CLI 却没有 Request-ID」的特征。
+        val requestId = turnRequestId.ifBlank { messageId }
+        return mapOf(
+            "X-Conversation-ID" to conversationId,
+            "X-Conversation-Request-ID" to requestId,
+            "X-Conversation-Message-ID" to messageId,
+            "X-Request-ID" to messageId,
+            "X-Agent-Intent" to "craft",
+            "X-Agent-Type" to "main",
+            "X-Root-Request-ID" to requestId
+        )
+    }
+
+    /**
+     * 链路追踪头族（官方的 OpenTelemetry / B3 混合形态）。
+     *
+     * 官方 CLI 的对话请求带一整套 trace 头：X-Trace-ID / traceparent / b3 /
+     * X-B3-TraceId / X-B3-SpanId / X-B3-Sampled，且它是「会话根 span 的子 span」，
+     * 故多带一个 X-B3-ParentSpanId、b3 取四段。
+     *
+     * 为什么值得逐条复刻：这套头是官方 SDK 的观测栈无条件注入的，普通裸 HTTP
+     * 客户端一个都没有。「自称官方 CLI 却没有任何 trace 头」属于低成本可判特征，
+     * 与国际出口的渠道校验正好对得上。
+     *
+     * 说明：这里只求形态正确（32hex trace、16hex span、采样位 1），不承担语义 ——
+     * 反代没有真实父子 span，parent 是随机的。
+     */
+    fun traceHeaders(): Map<String, String> {
+        val trace = UuidFactory.v7Hex()
+        val span = randomHex(8)
+        val parent = randomHex(8)
+        return mapOf(
+            "X-Trace-ID" to trace,
+            "traceparent" to "00-$trace-$span-01",
+            "b3" to "$trace-$span-1-$parent",
+            "X-B3-TraceId" to trace,
+            "X-B3-SpanId" to span,
+            "X-B3-ParentSpanId" to parent,
+            "X-B3-Sampled" to "1"
+        )
+    }
+
+    /** 生成 `bytes` 字节的小写 hex（官方 B3 span 为 8 字节）。 */
+    private fun randomHex(bytes: Int): String {
+        val buffer = ByteArray(bytes)
+        java.security.SecureRandom().nextBytes(buffer)
+        val out = StringBuilder(bytes * 2)
+        for (b in buffer) {
+            val v = b.toInt() and 0xFF
+            out.append("0123456789abcdef"[v ushr 4])
+            out.append("0123456789abcdef"[v and 0x0F])
+        }
+        return out.toString()
+    }
 }

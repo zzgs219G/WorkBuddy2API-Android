@@ -281,7 +281,14 @@ object NativeCore {
             "X-Enterprise-Id" to enterprise, "X-Tenant-Id" to enterprise,
             "X-Domain" to auth.optString("domain", account.region.defaultDomain).ifBlank { account.region.defaultDomain },
             "User-Agent" to ClientIdentity.CLI_UA
-        ).apply { putAll(ClientIdentity.pluginHeaders()) }
+        ).apply {
+            putAll(ClientIdentity.pluginHeaders(account.region))
+            // X-Private-Data 官方只在非国内站发（按 endpoint 判断），
+            // 故这里跟着 region 走，不给国内站凭空多出一个官方没有的头。
+            if (account.region == AccountRegion.INTERNATIONAL) {
+                put("X-Private-Data", ClientIdentity.privateDataHeader(enterprise))
+            }
+        }
     }
 
     /**
@@ -303,11 +310,19 @@ object NativeCore {
     private fun headersForConversation(context: Context, account: Account): MutableMap<String, String> {
         val session = SessionTracker.sessionFor(context, account.key)
         val messageId = SessionTracker.newMessageId()
+        // 本轮请求 ID：官方在一次 user send 开始时生成、该轮所有请求复用。
+        // 反代这里一个请求就是一轮，故按请求生成一个独立 id。
+        val turnRequestId = SessionTracker.newMessageId()
         return headersFor(account).apply {
-            putAll(ClientIdentity.conversationHeaders(session.conversationId, messageId))
+            putAll(ClientIdentity.conversationHeaders(session.conversationId, messageId, turnRequestId))
             // 官方 CLI 的对话请求是 OpenAI Node SDK 发出的，SDK 会自动注入
             // X-Stainless-* 指纹头；缺了这组头，「自称 CLI 却无 SDK 指纹」本身就是破绽。
             putAll(ClientIdentity.stainlessHeaders())
+            // trace 头族：国际出口的渠道校验会看它，国内出口不看。
+            // 只为国际版补，避免给国内版凭空加上官方客户端在抓包里也没出现过的组合。
+            if (account.region == AccountRegion.INTERNATIONAL) {
+                putAll(ClientIdentity.traceHeaders())
+            }
         }
     }
 
