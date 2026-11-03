@@ -319,15 +319,27 @@ fun AccountsScreen(context: Context, app: AppState) {
                             }
                             // 本次到账的积分单独一行高亮：这是签到最核心的结果，
                             // 混在说明文案里不容易看见。
-                            if (!result.isNull("credits_gained")) {
-                                val gained = result.optDouble("credits_gained", 0.0)
-                                if (gained != 0.0) {
-                                    Text(
-                                        "本次 " + if (gained > 0) "+%.1f".format(gained) else "%.1f".format(gained) + " 积分",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = if (gained > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                                    )
-                                }
+                            //
+                            // 只显示「已真正记入账本」的正数：
+                            //   · credits_gained 是原始快照差，already / 负差额时它不代表收益；
+                            //   · ledger_recorded 才是实际记账金额（NativeCore.checkIn 已剔除
+                            //     重复签到与负差额）。
+                            // 两者混用会让用户看到"本次 +8"却在收支里找不到 —— 那正是
+                            // 「签到了但没计入」的观感来源。
+                            val recorded = if (result.isNull("ledger_recorded")) 0.0
+                            else result.optDouble("ledger_recorded", 0.0)
+                            if (recorded > 0) {
+                                Text(
+                                    "本次 +%.1f 积分（已记入收支）".format(recorded),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            } else if (result.optBoolean("ledger_duplicate")) {
+                                Text(
+                                    "今日账本已有签到记录，未重复计分",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }
@@ -468,19 +480,29 @@ private fun AccountCard(
             // 额度后面带上本次签到增量：用户最直接的疑问是「签到了到底加没加额度」，
             // 光看「今日已签」答不了这个问题。增量来自 checkinResults 里同一账号的
             // credits_gained（NativeCore.checkIn 用签到前后余额快照算出来的真实差额）。
-            val gainedToday = remember(app.checkinResults, accountKey) {
+            // 额度后面带上今日签到增量：用户最直接的疑问是「签到了到底加没加额度」，
+            // 光看「今日已签」答不了这个问题。
+            //
+            // 【2026-11-03】优先读账本（ledger_recorded），回退到内存里的
+            // app.checkinResults。原因：
+            //   · checkinResults 只存在于内存，App 重启后就没了 —— 用户第二天早上
+            //     看账号页会发现"昨天的 +N 不见了"，而账本里其实一直有记录。
+            //   · 账本是持久化的事实来源，与「积分详情」显示的数字天然一致。
+            // 取不到账本（例如从没签过）就不显示，而不是显示 +0.0 制造噪音。
+            val gainedToday = remember(app.checkinResults, accountKey, app.revision) {
                 var value: Double? = null
                 val results = app.checkinResults
                 if (results != null) {
                     for (i in 0 until results.length()) {
                         val item = results.optJSONObject(i) ?: continue
-                        if (item.optString("account_key") == accountKey && !item.isNull("credits_gained")) {
-                            value = item.optDouble("credits_gained", 0.0)
+                        if (item.optString("account_key") == accountKey && !item.isNull("ledger_recorded")) {
+                            val recorded = item.optDouble("ledger_recorded", 0.0)
+                            if (recorded > 0) value = recorded
                             break
                         }
                     }
                 }
-                value
+                value ?: app.checkinGainToday(accountKey)
             }
             Text(
                 buildList {

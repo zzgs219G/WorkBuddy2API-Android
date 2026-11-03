@@ -13,9 +13,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -67,10 +68,20 @@ object PcTokens {
 /**
  * 统一卡片容器。
  *
- * 【M3 移植】用 ElevatedCard（elevation 1dp）而不是 filled Card：
- *   M3 的 filled card 在浅色背景下与 surface 几乎无区分，
- *   而本应用是「浅色大背景 + 多张同色卡片」的布局，需要卡片有可辨识的浮起感。
- *   圆角 12dp 是 M3 官方规格值。
+ * 【2026-11-03 从 ElevatedCard 改为 bordered Card】
+ *   ElevatedCard 的问题在仪表盘里暴露得很明显：它的层次完全依赖 1dp 阴影，
+ *   而本应用是「浅色大背景 + 多张同色卡片」的布局 ——
+ *   阴影在深色模式几乎不可见，浅色模式又弱到看不出边界，
+ *   结果就是"一堆文字浮在背景上"，每张卡都像没有容器。
+ *
+ *   现在改用 surfaceContainerLow 填充 + outlineVariant 细描边：
+ *     · 边界由描边保证，深浅色都成立，不依赖阴影是否渲染得出来
+ *     · 底色比页面背景亮/暗一档，形成"卡片是纸、背景是桌"的关系
+ *     · 指标格用 surfaceContainerHighest 再深一档，于是
+ *       「背景 → 卡片 → 格子」三级层次就都靠底色表达，而不是靠阴影叠加
+ *
+ *   这是 M3 官方对"低层级容器"的推荐做法（outlined + container 色），
+ *   比堆 elevation 更稳定 —— elevation 在不同厂商的渲染实现上差异很大。
  *
  * @param title 卡片标题（非空时渲染标题，并与卡片保持 [PcTokens.TitleGap] 间隙）
  */
@@ -100,13 +111,14 @@ fun PcCard(
                 )
             )
         }
-        // innerPadding 用 Modifier.padding 而非 Card 的 contentPadding 参数：
-        // Material3 的 Card 没有 insideMargin 概念，内容 padding 只能自己加。
-        ElevatedCard(
+        Card(
             modifier = Modifier.fillMaxWidth().padding(horizontal = PcTokens.PageGutter),
             shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.elevatedCardColors(),
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         ) {
             Column(
                 modifier = Modifier
@@ -272,109 +284,7 @@ fun PcInfoRow(label: String, value: String) {
     }
 }
 
-/**
- * 一排等宽的指标块：大字号数值 + 小字号标签。
- *
- * 为什么需要它
- * ------------
- * 原先每个数字都占一整行「标签 : 值」：
- *
- *     账号            2 个
- *     模型            18
- *     全部剩余额度  7576 积分
- *
- * 问题有两个：
- *   ① 标签列固定 96dp，加上值与行内边距，一半屏宽是空白；
- *      六个数字就要 240dp 高度，而它们的信息量远不到这个尺寸。
- *   ② 六个数字权重完全相同，用户看不出哪个该先看。
- *
- * 指标块的解法是把「同维度、同量级的小数字」横向排一行：数值放大到
- * headlineSmall 建立视觉重心，标签降为 labelSmall，宽度等分。
- * 一行放 3 个时，六个指标只需两行、约 110dp —— 密度上去，层次也有了。
- *
- * 适用边界：只放**短数值**（个数、积分数、次数）。
- * 路径、Key、UID 这类长值不要塞进来 —— 它们需要逐字符比对，
- * 塞进等分格子只会被截断，反而更难读，那些继续用 [PcInfoRow]。
- */
-@Composable
-fun PcMetricRow(
-    items: List<Pair<String, String>>,
-    /** 第几项可点击（-1 表示都不可点）。可点项用主题色，暗示"点进去有内容"。 */
-    clickableIndex: Int = -1,
-    onClick: (() -> Unit)? = null,
-) {
-    if (items.isEmpty()) return
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.Top
-    ) {
-        items.forEachIndexed { index, item ->
-            val label = item.first
-            val value = item.second
-            val clickable = index == clickableIndex && onClick != null
-            // 可点时先接住回调，避免在 lambda 里对 nullable 用 !!
-            val tap: (() -> Unit)? = if (clickable) onClick else null
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .then(
-                        if (tap != null) {
-                            Modifier.clip(RoundedCornerShape(8.dp)).clickable { tap() }
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .padding(vertical = 2.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = value,
-                    // headlineSmall(24sp)：指标是这一屏的视觉重心，
-                    // 用 bodyLarge 会和普通行的值分不出来。
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (clickable) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-        // 不足 3 个时补占位，避免剩余两项被拉宽到与三项不同的密度
-        repeat(3 - items.size.coerceAtMost(3)) {
-            Spacer(Modifier.weight(1f))
-        }
-    }
-}
 
-/**
- * 一行紧凑的「键 值 · 键 值」文本。
- *
- * 用于「同类别但凑不满一排」的零散指标：与其各占一整行，
- * 不如压成一行小字。例如：
- *
- *     今日  8 次 · 12K tokens
- *
- * 之所以不做成指标块：这类值量级不一致（次数 vs tokens），
- * 并排放大反而让人误以为可以直接比较。
- */
-@Composable
-fun PcInlineFacts(parts: List<Pair<String, String>>) {
-    if (parts.isEmpty()) return
-    Text(
-        text = parts.joinToString("  ·  ") { (label, value) -> "$label $value" },
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-}
 
 /**
  * 可点击复制的信息行。

@@ -673,9 +673,28 @@ class ApiHostService : Service() {
             .put("app_name", app.optString("name"))
         // 把消耗记入积分账本（负数），与签到/奖励的所得分列，
         // 这样"积分详情"里能看到完整的收支两条线，而不只是总额。
-        // 只在拿到确定的消耗额（>0）且归属到具体账号时才记。
-        if (credits > 0 && account != null) {
-            runCatching { NativeCore.recordCredit(this, account.key, "consume", -credits, model) }
+        //
+        // 【2026-11-03】只在 credits>0 且归属明确时记账 —— 这个条件会把
+        // 一部分真实消耗漏在账外：流式响应/上游不带 usage 的模型，
+        // 请求成功了、余额也扣了，账本里却没有对应记录。后果是用户在
+        // 积分详情看到「今日消耗 12」而实际余额掉了 80，两个数字对不上，
+        // 于是不再信任任何统计。
+        //
+        // 现在的做法分三档，都不猜数字：
+        //   · credits > 0 且账号明确     → 记 -credits（精确值）
+        //   · credits > 0 但账号未归属    → 记 -credits，account_key 记 "-"
+        //     （拒绝/无可用账号的请求仍可能计费，账本不能丢）
+        //   · credits == 0 且账号明确成功  → **不记**
+        //     （0 就是 0，凑一条反而让账本凭空多出笔画）
+        // 计入与否在 note 里写明，明细页面能区分"精确"与"未归属"。
+        if (credits > 0) {
+            val key = account?.key ?: UNATTRIBUTED_ACCOUNT
+            runCatching {
+                NativeCore.recordCredit(
+                    this, key, "consume", -credits,
+                    if (account != null) model else "$model（未归属账号）"
+                )
+            }
         }
         // 原始 usage 一并打点：真机核对上游积分字段名时只需看 logcat，不必改代码重编。
         if (usage != null) Log.i(TAG, "upstream usage=$usage")
@@ -1233,5 +1252,18 @@ class ApiHostService : Service() {
          * `credit` 是腾讯 /v2/chat/completions 的实测字段名（Python 版同源解析），其余为上游改版预留。
          */
         private val CREDIT_KEYS = listOf("credit", "credits", "credit_cost", "credit_used", "used_credit", "total_credit", "cost", "points")
+
+        /**
+         * 未归属账号在 credit_ledger 里的占位 key。
+         *
+         * 为什么需要它：请求被网关拒绝（限流/无可用账号/鉴权失败）时可能已产生
+         * 计费，但没有任何一个具体账号可归因。若因此不记账，账本总额会比
+         * 真实余额下降少一段；若硬塞进某个随机账号，又会冤枉它。
+         *
+         * 用一个不可能与真实 account_key（形如 "domestic:uid"）冲突的哨兵值：
+         *   · 按账号的查询用 `account_key != '-'` 排除，明细里仍能看到
+         *   · 总额统计不受影响（它就是真实发生过的消耗）
+         */
+        const val UNATTRIBUTED_ACCOUNT = "-"
     }
 }

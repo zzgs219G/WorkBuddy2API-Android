@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -65,28 +64,72 @@ fun UsageScreen(context: Context, app: AppState) {
         verticalArrangement = Arrangement.spacedBy(PcTokens.CardGap)
     ) {
         item {
-            // 4 行改成一排指标 + 一行累计。
-            // 原来「今日请求 / 今日 Tokens / 总请求 / 总 Tokens」四行并列，
-            // 权重完全相同，看不出主次 —— 而今日数据才是这一页的高频关注点。
+            // 今日数据做成指标格，累计数据降为一行小字。
+            // 今日才是这一页的高频关注点；「累计」是背景信息，不该和今日平级。
             PcCard(title = "用量") {
-                PcMetricRow(
+                val todayRequests = summary?.optLong("today_requests") ?: 0
+                val todayTokens = summary?.optLong("today_tokens") ?: 0
+                val today = app.usageToday
+                DashMetricGrid(
                     listOf(
-                        "今日请求" to (summary?.optLong("today_requests") ?: 0).toString(),
-                        "今日 Tokens" to FormatKit.tokens(summary?.optLong("today_tokens") ?: 0),
-                    )
+                        DashMetric(
+                            label = "今日请求",
+                            value = "$todayRequests",
+                            unit = "次",
+                            hint = today?.let {
+                                val failed = it.optInt("failed")
+                                if (failed > 0) "失败 $failed" else "全部成功"
+                            },
+                        ),
+                        DashMetric(
+                            label = "今日 Tokens",
+                            value = FormatKit.tokens(todayTokens),
+                            hint = if (todayRequests > 0) "均 ${FormatKit.tokens(todayTokens / todayRequests)} / 次" else "—",
+                        ),
+                        DashMetric(
+                            label = "今日消耗",
+                            value = "%.0f".format(today?.optDouble("credits", 0.0) ?: 0.0),
+                            valueColor = if ((today?.optDouble("credits", 0.0) ?: 0.0) > 0) {
+                                MaterialTheme.colorScheme.error
+                            } else null,
+                        ),
+                        DashMetric(
+                            label = "累计请求",
+                            value = FormatKit.tokens(summary?.optLong("total_requests") ?: 0),
+                            hint = "累计 ${FormatKit.tokens(summary?.optLong("total_tokens") ?: 0)} tok",
+                        ),
+                    ),
+                    perRow = 2,
                 )
                 Spacer(Modifier.height(PcTokens.SpaceS))
-                PcInlineFacts(
-                    listOf(
-                        "累计请求" to (summary?.optLong("total_requests") ?: 0).toString(),
-                        "累计 Tokens" to FormatKit.tokens(summary?.optLong("total_tokens") ?: 0),
-                    )
-                )
-                Spacer(Modifier.height(PcTokens.SpaceS))
-                TextButton(
-                    onClick = { app.loadUsage() },
-                    enabled = !app.busy,
-                ) { Text(if (app.busy) "刷新中…" else "刷新统计") }
+                TextButton(onClick = { app.loadUsage() }, enabled = !app.busy) {
+                    Text(if (app.busy) "刷新中…" else "刷新统计")
+                }
+            }
+        }
+
+        // ---------------- 今日按账号 ----------------
+        // 与记录页同一份数据（AppState.usageByAccount），只是这里更强调"分布"。
+        if (app.usageByAccount.length() > 0) {
+            item { DashSectionHeader(title = "今日按账号", subtitle = "消耗与请求分布") }
+            item {
+                PcCard {
+                    val rows = com.dsh.aihub.NativeStore.sortUsageByAccount(app.usageByAccount)
+                    val maxCredits = rows.maxOfOrNull { it.optDouble("credits", 0.0) } ?: 0.0
+                    rows.forEachIndexed { index, row ->
+                        if (index > 0) PcDivider()
+                        val uid = row.optString("account_uid")
+                        DashRankRow(
+                            name = row.optString("name").ifBlank {
+                                if (uid.isBlank()) "未归属" else FormatKit.shortUid(uid)
+                            },
+                            value = "%.1f".format(row.optDouble("credits", 0.0)),
+                            detail = "${row.optInt("requests")} 次 · " +
+                                FormatKit.tokens(row.optLong("tokens")) + " tok",
+                            fraction = if (maxCredits > 0) (row.optDouble("credits", 0.0) / maxCredits).toFloat() else null,
+                        )
+                    }
+                }
             }
         }
 
@@ -110,35 +153,34 @@ fun UsageScreen(context: Context, app: AppState) {
             val credits = app.credits
             PcCard {
                 if (credits == null || credits.optInt("known") == 0) {
-                    // 【M3 移植】原 MiuixTheme.textStyles.body2 + onSurfaceVariantSummary
-                    // 等价映射为 Body Small + onSurfaceVariant。
                     Text("额度数据未加载，点击下方按钮刷新。", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(PcTokens.SpaceS))
                     Button(onClick = { app.refreshCredits() }, enabled = !app.busy,
                         modifier = Modifier.fillMaxWidth()) { Text("刷新全部账号额度") }
                 } else {
-                    // 【M3 移植】原 MiuixTheme.textStyles.title3 不在契约映射表里，
-                    // 它在这里承载的是卡片内的强调数字，最近的小标题级别是 M3 的 Title Medium。
-                    Text(
-                        "全部剩余 ${FormatKit.credits(credits.optDouble("remain"))} 积分",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(Modifier.height(PcTokens.SpaceS / 2))
-                    Text(
-                        "总额度 ${FormatKit.credits(credits.optDouble("total"))} 积分 · " +
-                            "已汇总 ${credits.optInt("known")}/${credits.optInt("accounts")} 个账号",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    val remain = credits.optDouble("remain")
                     val total = credits.optDouble("total")
-                    val ratio = if (total > 0) (credits.optDouble("remain") / total).toFloat().coerceIn(0f, 1f) else 0f
+                    DashMetricGrid(
+                        listOf(
+                            DashMetric(
+                                label = "剩余积分",
+                                value = FormatKit.credits(remain),
+                                emphasize = true,
+                                hint = "已汇总 ${credits.optInt("known")}/${credits.optInt("accounts")} 个账号",
+                            ),
+                            DashMetric(
+                                label = "总额度",
+                                value = FormatKit.credits(total),
+                                hint = "已用 ${FormatKit.credits((total - remain).coerceAtLeast(0.0))}",
+                            ),
+                        ),
+                        perRow = 2,
+                    )
                     Spacer(Modifier.height(PcTokens.SpaceS))
-                    // 【M3 移植】Material3（1.4.0）的 LinearProgressIndicator 只保留
-                    // progress: () -> Float 的 lambda 重载，裸 Float 重载已标记 HIDDEN
-                    // （lambdas=true 下调用会编译失败），因此这里改成 lambda 形式。
-                    LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
+                    DashBar(fraction = if (total > 0) (remain / total).toFloat() else 0f)
+                    Spacer(Modifier.height(PcTokens.SpaceS / 2))
+                    DashCaption("剩余占总额 ${if (total > 0) "%.0f".format(remain / total * 100) else "—"}%")
                 }
             }
         }
@@ -146,18 +188,21 @@ fun UsageScreen(context: Context, app: AppState) {
         item { SectionTitle(text = "最近 24 小时") }
         if (nonEmpty.isEmpty()) {
             item {
-                PcCard {
-                    Text("暂无调用趋势，成功或失败的调用会按小时聚合。",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                PcCard { DashEmpty("暂无调用趋势，成功或失败的调用会按小时聚合。") }
             }
         } else {
-            nonEmpty.takeLast(12).forEach { point ->
-                item {
-                    PcCard {
-                        PcInfoRow(
-                            point.optString("bucket"),
-                            "${point.optLong("count")} 次 · ${FormatKit.tokens(point.optLong("tokens"))} tokens"
+            // 按小时的趋势做成排行行：右侧是次数，条形长度是相对峰值。
+            // 原先每小时一张卡（一行标签值），12 个点就是 12 张卡 ——
+            // 竖向滚半天看不出"哪个时段最忙"，而那正是看趋势的唯一目的。
+            item {
+                PcCard {
+                    val peak = nonEmpty.maxOfOrNull { it.optLong("count") } ?: 0L
+                    nonEmpty.takeLast(12).forEach { point ->
+                        DashRankRow(
+                            name = point.optString("bucket"),
+                            value = "${point.optLong("count")} 次",
+                            detail = FormatKit.tokens(point.optLong("tokens")) + " tok",
+                            fraction = if (peak > 0) (point.optLong("count").toFloat() / peak) else null,
                         )
                     }
                 }
@@ -173,20 +218,32 @@ private fun BreakdownCard(rows: JSONArray?, key: String, emptyHint: String) {
         // 用 if/else 而不是提前 return：PcCard 的 content 是 ColumnScope lambda，
         // 在其中 return@PcCard 会让编译器认为后续 @Composable 调用可能不在组合上下文里。
         if (rows == null || rows.length() == 0) {
-            Text("暂无统计数据：$emptyHint", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            DashEmpty("暂无统计数据：$emptyHint")
+        }
+        // 分布用排行行 + 比例条：横向比较"哪个模型/应用花得最多"是这一段的唯一用途，
+        // 而「名称 : 次数 · tokens · 积分」的标签值行需要逐行读数字才能比出来。
+        // 条形长度取相对最大消耗，没有消耗数据时退化为按次数。
+        var maxMetric = 0.0
+        for (i in 0 until (rows?.length() ?: 0)) {
+            val item = rows?.optJSONObject(i) ?: continue
+            maxMetric = maxOf(maxMetric, item.optDouble("credits", 0.0), item.optLong("count").toDouble())
         }
         for (i in 0 until (rows?.length() ?: 0)) {
-            val item = rows!!.optJSONObject(i) ?: continue
+            val item = rows?.optJSONObject(i) ?: continue
+            if (i > 0) PcDivider()
             // grouped() 的键就是传入的 alias（protocol / model / app）。
             val name = item.optString(key).ifBlank { "（未指定）" }
             val credits = item.optDouble("credits", 0.0)
-            val detail = buildString {
-                append("${item.optLong("count")} 次 · ${FormatKit.tokens(item.optLong("tokens"))} tokens")
-                // 积分始终显示（含 0），否则用户无法判断"这一项到底有没有扣分"。
-                append(" · ").append("%.2f".format(credits)).append(" 积分")
-            }
-            PcInfoRow(name, detail)
+            val count = item.optLong("count")
+            val metric = if (credits > 0) credits else count.toDouble()
+            DashRankRow(
+                name = name,
+                value = "${"%.2f".format(credits)} 积分",
+                detail = "$count 次 · ${FormatKit.tokens(item.optLong("tokens"))} tok",
+                fraction = if (maxMetric > 0) (metric / maxMetric).toFloat() else null,
+                valueColor = if (credits > 0) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -341,17 +398,18 @@ fun StorageScreen(context: Context, app: AppState) {
             // 原来「内容合计」下面又列「· 输入 / · 输出 / · 思考链」三个子行，
             // 四个数字占了四行 —— 而它们同属「内容占用」这一个概念。
             PcCard(title = "数据库") {
-                PcMetricRow(
+                DashMetricGrid(
                     listOf(
-                        "文件大小" to FormatKit.bytes(info.optLong("db_bytes")),
-                        "记录条数" to info.optLong("rows").toString(),
-                        "可回收" to FormatKit.bytes(info.optLong("free_bytes")),
-                    )
+                        DashMetric("文件大小", FormatKit.bytes(info.optLong("db_bytes"))),
+                        DashMetric("记录条数", info.optLong("rows").toString()),
+                        DashMetric("可回收", FormatKit.bytes(info.optLong("free_bytes"))),
+                    ),
+                    perRow = 3,
                 )
                 val content = info.optLong("input_bytes") + info.optLong("output_bytes") + info.optLong("reasoning_bytes")
                 if (content > 0) {
                     Spacer(Modifier.height(PcTokens.SpaceS))
-                    PcInlineFacts(
+                    DashFacts(
                         listOf(
                             "内容合计" to FormatKit.bytes(content),
                             "输入" to FormatKit.bytes(info.optLong("input_bytes")),
@@ -368,25 +426,34 @@ fun StorageScreen(context: Context, app: AppState) {
             // 子项按「可清理 / 不可清理」分组比平铺更有用 ——
             // 用户来这里的目的通常是"能腾出多少空间"。
             PcCard(title = "目录占用（实测）") {
-                PcMetricRow(
-                    listOf("数据目录合计" to FormatKit.bytes(breakdown.optLong("data_total")))
+                DashMetricGrid(
+                    listOf(
+                        DashMetric("数据目录合计", FormatKit.bytes(breakdown.optLong("data_total")), emphasize = true),
+                    ),
+                    perRow = 1,
                 )
                 Spacer(Modifier.height(PcTokens.SpaceS))
-                PcInlineFacts(
-                    listOf(
-                        "数据库" to FormatKit.bytes(breakdown.optLong("databases")),
-                        "files" to FormatKit.bytes(breakdown.optLong("files")),
+                // 子目录用排行行：这一页的用途是"哪儿占空间、能腾多少"，
+                // 排行 + 比例条比把四个字节数拼成一句话直观得多。
+                val dirs = listOf(
+                    "数据库" to breakdown.optLong("databases"),
+                    "files" to breakdown.optLong("files"),
+                    "WebView 缓存" to breakdown.optLong("webview"),
+                    "cache" to breakdown.optLong("cache"),
+                    "code_cache" to breakdown.optLong("code_cache"),
+                    "外部缓存" to breakdown.optLong("external_cache"),
+                ).filter { it.second > 0 }.sortedByDescending { it.second }
+                val peak = dirs.firstOrNull()?.second ?: 0L
+                dirs.forEachIndexed { index, (label, size) ->
+                    if (index > 0) PcDivider()
+                    DashRankRow(
+                        name = label,
+                        value = FormatKit.bytes(size),
+                        fraction = if (peak > 0) (size.toFloat() / peak) else null,
                     )
-                )
-                Spacer(Modifier.height(2.dp))
-                PcInlineFacts(
-                    listOf(
-                        "WebView 缓存" to FormatKit.bytes(breakdown.optLong("webview")),
-                        "cache" to FormatKit.bytes(breakdown.optLong("cache")),
-                        "code_cache" to FormatKit.bytes(breakdown.optLong("code_cache")),
-                        "外部缓存" to FormatKit.bytes(breakdown.optLong("external_cache")),
-                    )
-                )
+                }
+                Spacer(Modifier.height(PcTokens.SpaceS / 2))
+                DashCaption("以上合计 " + FormatKit.bytes(dirs.sumOf { it.second }))
             }
         }
 

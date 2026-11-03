@@ -178,8 +178,13 @@ class GrowthRunner(
                 else -> "本次余额减少 %.1f（%.1f → %.1f），通常是期间的调用消耗，不是任务扣分。".format(-delta, creditsBefore, creditsAfter)
             }
             results.put(result("(积分汇总)", if (delta > 0) "done" else "skipped", text))
-            // 差额同步记入积分账本，让「积分详情」里也能看到这次任务的收益
-            if (delta != 0.0) {
+            // 差额同步记入积分账本，让「积分详情」里也能看到这次任务的收益。
+            //
+            // 只在 delta > 0 时记：负差额是期间的调用消耗，那些已经由
+            // ApiHostService 按 kind=consume 各记了一笔。这里再记一个负数，
+            // 等于把同一笔消耗算两次，而且会让「任务」这一类在收支里显示为亏损。
+            // 判定口径与 checkIn 一致：收益类账目只记正数。
+            if (delta > 0) {
                 runCatching { NativeCore.recordCredit(api.appContextCompat(), accountKey, "task", delta, "一键做任务") }
             }
         } else {

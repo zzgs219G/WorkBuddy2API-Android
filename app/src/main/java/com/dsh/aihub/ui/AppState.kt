@@ -59,6 +59,19 @@ class AppState(private val context: Context) {
     var accountHealth by mutableStateOf<JSONArray>(JSONArray()); private set
     var checkinResults by mutableStateOf<JSONArray?>(null); private set
     var usageSummary by mutableStateOf<JSONObject?>(null); private set
+
+    /**
+     * 今日各账号消耗明细（谁在扣分）。
+     *
+     * 为什么单独一份状态而不是从 usageRecords 里现算：
+     *   usageRecords 只有最近 100 条，跨账号/跨时段聚合必然漏数据；
+     *   这份由 SQL 按账号 GROUP BY 出来，是完整口径。
+     *   概览与记录页都要用，放在这里共享，避免两处各查一遍库。
+     */
+    var usageByAccount by mutableStateOf<JSONArray>(JSONArray()); private set
+
+    /** 今日整体用量（请求/成功/tokens/消耗），与 [usageByAccount] 同一口径。 */
+    var usageToday by mutableStateOf<JSONObject?>(null); private set
     var usageRecords by mutableStateOf<JSONArray>(JSONArray()); private set
     var usageTotal by mutableStateOf(0); private set
     var usageSeries by mutableStateOf<JSONArray>(JSONArray()); private set
@@ -256,11 +269,16 @@ class AppState(private val context: Context) {
             val summary = runCatching { NativeCore.usageSummary(context) }.getOrNull()
             val recent = runCatching { NativeCore.usageRecent(context, pageSize = 100) }.getOrNull()
             val series = runCatching { NativeCore.usageTimeseries(context) }.getOrDefault(JSONArray())
+            // 今日按账号聚合：概览页「谁在消耗」与记录页顶部汇总共用这一份。
+            val byAccount = runCatching { NativeCore.usageTodayByAccount(context) }.getOrDefault(JSONArray())
+            val today = runCatching { NativeCore.usageTodayTotals(context) }.getOrNull()
             withContext(Dispatchers.Main) {
                 usageSummary = summary
                 usageRecords = recent?.optJSONArray("records") ?: JSONArray()
                 usageTotal = recent?.optInt("total") ?: 0
                 usageSeries = series
+                usageByAccount = byAccount
+                usageToday = today
                 usageLoadedAt = System.currentTimeMillis()
                 bump()
             }
@@ -384,6 +402,24 @@ class AppState(private val context: Context) {
             "已删除 $label"
         } else "删除失败：账号已不存在"
     }
+
+    /** 某账号今天从账本里读到的签到收益（持久化，重启后仍在）。没有记录返回 null。 */
+    fun checkinGainToday(accountKey: String): Double? {
+        val cache = checkinGainTodayCache
+        val key = accountKey to java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            .format(java.util.Date())
+        if (cache != null && cache.first == key) return cache.second
+        val value = runCatching {
+            val summary = NativeCore.store(context).creditLedgerSummary(accountKey)
+            val kinds = summary.optJSONObject("kinds")?.optJSONObject("checkin")
+            kinds?.optDouble("today_gain", 0.0)?.takeIf { it > 0 }
+        }.getOrNull()
+        checkinGainTodayCache = key to value
+        return value
+    }
+
+    /** [checkinGainToday] 的单值缓存：避免每张账号卡重组都查一次库（NativeStore 是单锁串行）。 */
+    private var checkinGainTodayCache: Pair<Pair<String, String>, Double?>? = null
 
     fun refreshCredits() = task("刷新全部额度") {
         val response = NativeCore.refreshAllCredits(context)

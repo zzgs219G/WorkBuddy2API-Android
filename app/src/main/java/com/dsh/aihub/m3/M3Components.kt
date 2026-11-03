@@ -1,5 +1,6 @@
 package com.dsh.aihub.m3
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -9,8 +10,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
@@ -134,9 +135,10 @@ fun LabelSummary(
 /**
  * 填充式卡片（替代 Miuix 的 Card）。
  *
- * 用 ElevatedCard 而不是 Card：M3 中 filled card 的 elevation 是 0dp，
- * 在浅色背景上与 surface 几乎无区分；elevated card 是 1dp，
- * 在本应用这种「浅色大背景 + 多张同色卡片」的布局里可读性明显更好。
+ * 【2026-11-03 与 PcCard 对齐】改用 surfaceContainerLow + 细描边，不用 elevation。
+ *   原因见 PcCard 的注释：elevation 的 1dp 阴影在深色模式与低对比屏上不可靠，
+ *   而本应用大量并置卡片，需要稳定可见的边界。两套卡片组件必须同款，
+ *   否则同一屏里会出现"有的卡有边、有的卡没边"。
  *
  * 圆角 12dp、内边距 16dp 均为 M3 规定值。
  */
@@ -147,13 +149,14 @@ fun AppCard(
     contentPadding: PaddingValues = PaddingValues(SpaceL),
     content: @Composable () -> Unit
 ) {
-    ElevatedCard(
+    Card(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = SpaceL),
         shape = RoundedCornerShape(RadiusCard),
-        colors = CardDefaults.elevatedCardColors(),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Column(modifier = Modifier.padding(contentPadding)) {
             if (title != null) {

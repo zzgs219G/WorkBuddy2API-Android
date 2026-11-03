@@ -265,31 +265,17 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
     })
 
     /**
-     * 今日用量汇总：返回 (请求数, 消耗积分)。
+     * 今日用量汇总：返回 (请求数, 消耗积分)，供悬浮球使用。
      *
-     * 「今日」按本地时区当天 00:00 起算，与 UI 上「今日」的口径一致。
-     * 只统计成功请求 —— 错误请求不消耗额度，算进去会让数字虚高。
+     * 【口径统一 2026-11-03】原实现只统计 `status='ok'`。但同一块面板上的
+     * 「今日请求」在概览页是**全部请求**（含失败，失败另有成功率表示），
+     * 两处标签相同、数字不同 —— 用户对不上账。现改为与
+     * [usageTodayTotals] 完全同源：请求数含失败，消耗积分按上游回报求和
+     * （失败请求的 credits 本就是 0，不影响该值）。
      */
-    fun usageSummaryToday(): Pair<Int, Double> = run {
-        val cal = java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.HOUR_OF_DAY, 0)
-            set(java.util.Calendar.MINUTE, 0)
-            set(java.util.Calendar.SECOND, 0)
-            set(java.util.Calendar.MILLISECOND, 0)
-        }
-        val startTs = cal.timeInMillis / 1000.0
-        var count = 0
-        var credits = 0.0
-        readableDatabase.rawQuery(
-            "SELECT COUNT(*), COALESCE(SUM(credits),0) FROM usage_logs WHERE ts>=? AND status='ok'",
-            arrayOf(startTs.toString())
-        ).use { c ->
-            if (c.moveToFirst()) {
-                count = c.getInt(0)
-                credits = c.getDouble(1)
-            }
-        }
-        count to credits
+    fun usageSummaryToday(): Pair<Int, Double> {
+        val totals = usageTodayTotals()
+        return totals.optInt("requests") to totals.optDouble("credits", 0.0)
     }
 
 
@@ -434,7 +420,17 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
         out
     }
 
-    /** 某账号的积分明细（倒序，最新在前）。 */
+    /** 某账号今天是否已记过某一类账（用于防止自动签到 + 手动签到重复记账）。 */
+    fun hasCreditToday(accountKey: String, kind: String): Boolean = run {
+        readableDatabase.rawQuery(
+            "SELECT 1 FROM credit_ledger WHERE account_key=? AND kind=? AND ts>=? LIMIT 1",
+            arrayOf(accountKey, kind, localMidnight().toString())
+        ).use { it.moveToFirst() }
+    }
+
+    /**
+     * 某账号的积分明细（倒序，最新在前）。 */
+
     fun creditLedger(accountKey: String, limit: Int = 200): JSONArray = run {
         val out = JSONArray()
         readableDatabase.rawQuery(
@@ -497,13 +493,24 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
      * （第一件是"还剩多少"）。数据一直在 credit_ledger 里（ApiHostService
      * 每次调用都写 kind="consume" 的负数），只是从没聚合出来展示。
      *
-     * @return {today_gain, today_loss, net, by_kind:{kind:{gain,loss,count}}}
+     * @return {today_gain, today_loss, net, by_kind:{kind:{gain,loss,count}},
+     *           by_key:{account_key:{gain,loss,count}}, unattributed_loss}
+     *
+     * 【2026-11-03】补 by_key 与 unattributed_loss：
+     *   · by_key 让界面能回答「今天谁花了多少、谁赚了多少」，此前只有按 kind 的
+     *     聚合，多账号下无法定位到账号（用户原话：「只能看到总共消耗了多少」）。
+     *   · unattributed_loss 是 account_key='-'（哨兵值，见
+     *     ApiHostService.UNATTRIBUTED_ACCOUNT）的消耗。它计入总额但不属于任何
+     *     账号，界面必须显式提示，否则「各账号消耗相加 ≠ 总消耗」会让用户
+     *     以为统计坏了。
      */
     fun creditFlowToday(): JSONObject = run {
         val todayStart = todayStartSeconds()
         var gain = 0.0
         var loss = 0.0
         val byKind = JSONObject()
+        val byKey = JSONObject()
+        var unattributedLoss = 0.0
         readableDatabase.rawQuery(
             """SELECT kind,
                       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS g,
@@ -522,11 +529,33 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
                 loss += l
             }
         }
+        readableDatabase.rawQuery(
+            """SELECT account_key,
+                      SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS g,
+                      SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) AS l,
+                      COUNT(*) AS n
+               FROM credit_ledger WHERE ts>=?
+               GROUP BY account_key ORDER BY l DESC, g DESC""",
+            arrayOf(todayStart.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                val key = c.getString(0)
+                val g = c.getDouble(1)
+                val l = c.getDouble(2)
+                if (key == "-") {
+                    unattributedLoss += l
+                    continue
+                }
+                byKey.put(key, JSONObject().put("gain", g).put("loss", l).put("count", c.getInt(3)))
+            }
+        }
         JSONObject()
             .put("today_gain", gain)
             .put("today_loss", loss)
             .put("net", gain - loss)
             .put("by_kind", byKind)
+            .put("by_key", byKey)
+            .put("unattributed_loss", unattributedLoss)
     }
 
     /**
@@ -953,6 +982,98 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
         })
     }
 
+    /**
+     * 今日各账号的调用消耗明细。
+     *
+     * 为什么必须单独有这个查询：此前"消耗"只有一个总数（今日收支里的 -82），
+     * 多账号下这个数字无法回答任何一个实际问题 —— 是哪个号在花？花在哪个应用上？
+     * 而 usage_logs 每一行本来就带 account_uid 与 credits，只是从来没人按它分组。
+     *
+     * 数据源刻意选 usage_logs 而不是 credit_ledger：
+     *   · usage_logs 每次请求都写（失败也写，credits=0），账本只在 credits>0 时写，
+     *     所以只有前者能同时给出「请求数 / 成功率 / tokens / 消耗」四个维度。
+     *   · 两者的 credits 都取自上游 usage.credit，口径一致，不会算出两套总数。
+     *
+     * @return [{account_uid, account_key, name, region, requests, ok, failed,
+     *           credits, tokens}]，按消耗降序；未归属（拒绝请求等）的 uid 排在最后。
+     */
+    fun usageTodayByAccount(): JSONArray = run {
+        val since = localMidnight()
+        val out = JSONArray()
+        readableDatabase.rawQuery(
+            """SELECT u.account_uid,
+                      COALESCE(a.nickname,''), COALESCE(a.remark,''), COALESCE(a.region,''),
+                      COUNT(*) AS n,
+                      SUM(CASE WHEN u.status='ok' THEN 1 ELSE 0 END) AS ok_n,
+                      COALESCE(SUM(u.credits),0) AS c,
+                      COALESCE(SUM(u.total_tokens),0) AS t
+               FROM usage_logs u LEFT JOIN accounts a ON a.uid = u.account_uid
+               WHERE u.ts >= ? AND u.account_uid <> ''
+               GROUP BY u.account_uid, a.region
+               -- 排序规则与 NativeStore.sortUsageByAccount 必须一致
+               -- （那边是同一条规则的纯函数版本，供界面二次排序与单测使用）。
+               ORDER BY c DESC, n DESC, u.account_uid ASC""",
+            arrayOf(since.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                val uid = c.getString(0).orEmpty()
+                val nickname = c.getString(1).orEmpty()
+                val remark = c.getString(2).orEmpty()
+                val region = c.getString(3).orEmpty()
+                val requests = c.getInt(4)
+                val ok = c.getInt(5)
+                out.put(
+                    JSONObject()
+                        .put("account_uid", uid)
+                        .put("account_key", if (uid.isBlank() || region.isBlank()) "" else "$region:$uid")
+                        // 备注优先于昵称：用户自己起的名字比上游显示名更好认（与账号卡一致）
+                        .put("name", remark.ifBlank { nickname })
+                        .put("region", region.ifBlank { "domestic" })
+                        .put("requests", requests)
+                        .put("ok", ok)
+                        .put("failed", requests - ok)
+                        .put("credits", c.getDouble(6))
+                        .put("tokens", c.getLong(7))
+                )
+            }
+        }
+        out
+    }
+
+    /** 今日整体用量：请求数 / 成功数 / tokens / 消耗积分。 */
+    fun usageTodayTotals(): JSONObject = run {
+        val since = localMidnight()
+        var requests = 0; var ok = 0; var tokens = 0L; var credits = 0.0
+        var unattributed = 0; var unattributedCredits = 0.0
+        readableDatabase.rawQuery(
+            """SELECT COUNT(*), SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),
+                      COALESCE(SUM(total_tokens),0), COALESCE(SUM(credits),0)
+               FROM usage_logs WHERE ts>=?""",
+            arrayOf(since.toString())
+        ).use { c ->
+            if (c.moveToFirst()) {
+                requests = c.getInt(0); ok = c.getInt(1); tokens = c.getLong(2); credits = c.getDouble(3)
+            }
+        }
+        // 未归属请求单独统计：被网关拒绝（限流/无可用账号/鉴权失败）的调用没有
+        // 落到具体账号，因此「按账号」列表里看不到它们。若只展示总数，
+        // 用户把各账号的消耗相加会得到一个比总数小的数，然后怀疑统计坏了。
+        // 这里把差额显式给出来，界面上就能说清"差额在未归属请求里"。
+        readableDatabase.rawQuery(
+            """SELECT COUNT(*), COALESCE(SUM(credits),0) FROM usage_logs
+               WHERE ts>=? AND account_uid=''""",
+            arrayOf(since.toString())
+        ).use { c ->
+            if (c.moveToFirst()) {
+                unattributed = c.getInt(0); unattributedCredits = c.getDouble(1)
+            }
+        }
+        JSONObject()
+            .put("requests", requests).put("ok", ok).put("failed", requests - ok)
+            .put("tokens", tokens).put("credits", credits)
+            .put("unattributed", unattributed).put("unattributed_credits", unattributedCredits)
+    }
+
     fun usageSummary(): JSONObject = run {
         val total = aggregate("SELECT COUNT(*) c,COALESCE(SUM(total_tokens),0) t FROM usage_logs")
         val today = aggregate("SELECT COUNT(*) c,COALESCE(SUM(total_tokens),0) t FROM usage_logs WHERE ts>=?", arrayOf(localMidnight().toString()))
@@ -1201,6 +1322,31 @@ class NativeStore private constructor(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "workbuddy-native.db"
+
+        /**
+         * 「今日按账号消耗」的排序规则（纯函数，便于单测）。
+         *
+         * 为什么排序要单独抽出来：这一屏（概览「账号池」/记录页「今日按账号」）
+         * 的全部价值就是**排序** —— 用户扫一眼是为了找"谁在烧钱"。
+         * 顺序错了程序不崩、数字也对，但结论反过来：最能花的号沉到底部。
+         *
+         * 规则：
+         *   ① 消耗多的在前
+         *   ② 消耗相同看请求数（都是 0 消耗时，谁跑得多）
+         *   ③ 再相同按 uid 稳定排序 —— 不稳定的话每次重组行序会跳，
+         *      在 Compose 里表现为"列表自己在动"，很干扰阅读
+         *
+         * 未归属请求（account_uid 为空，被网关拒绝的那类）credits 恒为 0，
+         * 因此自然沉底，不需要特判。
+         */
+        fun sortUsageByAccount(rows: JSONArray): List<JSONObject> =
+            (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
+                .sortedWith(
+                    compareByDescending<JSONObject> { it.optDouble("credits", 0.0) }
+                        .thenByDescending { it.optInt("requests", 0) }
+                        .thenBy { it.optString("account_uid") }
+                )
+
         /**
          * 数据库版本。
          *

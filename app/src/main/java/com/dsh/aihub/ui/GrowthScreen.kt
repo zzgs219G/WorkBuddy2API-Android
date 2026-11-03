@@ -3,12 +3,10 @@ package com.dsh.aihub.ui
 import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
@@ -22,7 +20,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -157,11 +154,7 @@ fun GrowthScreen(context: Context, accountKey: String?) {
         item {
             PcCard(title = "今日收益") {
                 if (gains.length() == 0) {
-                    Text(
-                        "今天还没有收益记录。执行下方任务或签到后，这里会按账号列出到账金额。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    DashEmpty("今天还没有收益记录。执行下方任务或签到后，这里会按账号列出到账金额。")
                 } else {
                     // 按账号合并：同一账号可能有 task / checkin 多条，先求和再展示，
                     // 否则一个号会重复出现两行，看不出是同一个号。
@@ -172,39 +165,37 @@ fun GrowthScreen(context: Context, accountKey: String?) {
                         byAccount[label] = (byAccount[label] ?: 0.0) + g.optDouble("total")
                     }
                     val total = byAccount.values.sum()
-                    PcMetricRow(
+                    // 合计是这一屏的主数字，用指标格而不是 label:值。
+                    DashMetricGrid(
                         listOf(
-                            "今日合计" to "+${"%.1f".format(total)}",
-                            "涉及账号" to byAccount.size.toString(),
-                        )
+                            DashMetric(
+                                label = "今日合计",
+                                value = "+${"%.1f".format(total)}",
+                                valueColor = MaterialTheme.colorScheme.primary,
+                                emphasize = true,
+                            ),
+                            DashMetric(
+                                label = "涉及账号",
+                                value = byAccount.size.toString(),
+                                unit = "个",
+                            ),
+                        ),
+                        perRow = 2,
                     )
                     Spacer(Modifier.height(PcTokens.SpaceS))
+                    // 各账号收益用排行行 + 比例条：一眼看出哪个号贡献最多，
+                    // 而不是读一遍 bodySmall 的数字再心算比较。
+                    val peak = byAccount.values.maxOrNull() ?: 0.0
                     byAccount.entries.forEach { (label, amount) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                label,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                "+${"%.1f".format(amount)}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
+                        DashRankRow(
+                            name = label,
+                            value = "+${"%.1f".format(amount)}",
+                            fraction = if (peak > 0) (amount / peak).toFloat() else null,
+                            valueColor = MaterialTheme.colorScheme.primary,
+                        )
                     }
                     Spacer(Modifier.height(PcTokens.SpaceS / 2))
-                    Text(
-                        "明细见「账号」页 → 积分详情",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    DashCaption("明细见「账号」页 → 积分详情")
                 }
             }
         }

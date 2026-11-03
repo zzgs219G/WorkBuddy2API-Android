@@ -687,11 +687,21 @@ object NativeCore {
         }
 
         // ① 签到前快照。
-        //    优先用本地缓存（省一次请求）；若从未刷新过额度（缓存为空），
-        //    则主动查一次 —— 否则 gained 永远算不出来，界面会一直显示
-        //    "缺少签到前快照"，那对用户是无意义的噪声。
-        val before = readCachedCredits(context, account.key)
-            ?: runCatching { refreshCredits(context, account.key).optDouble("remain") }.getOrNull()
+        //
+        // 【必须现查，不能读缓存】
+        //   原实现是「先读本地缓存省一次请求，读不到再查」，但读缓存那条路
+        //   其实从未成功过 —— readCachedCredits 走 loadAccount → getAccountRoot，
+        //   拿到的是导入时的 auth_json 原文，里面根本没有 credits_remaining
+        //   （那是 accounts 表的一列，由 setAccountCredits 写入，不在 auth_json 里）。
+        //   于是每次都白白走到 fallback，多一层无用的分支判断。
+        //
+        //   现在干脆只用现查。语义上也更正确：gained = 签到后 - 签到前，
+        //   两个快照必须来自同一口径的实时查询。用缓存当基准，会把
+        //   「上次刷新到现在期间的调用消耗」算进签到收益里 —— 缓存最旧可能是
+        //   30 分钟前的（credit_refresh_min 默认 30），那期间的消耗能被当成负收益，
+        //   也能让真实签到收益偏小。
+        val before = runCatching { refreshCredits(context, account.key).optDouble("remain") }.getOrNull()
+        val beforeAt = System.currentTimeMillis()
 
         val h = headersForFresh(context, account).apply { this["User-Agent"] = ClientIdentity.BROWSER_UA }
         val data = executeJson(
@@ -716,26 +726,39 @@ object NativeCore {
 
         // 记入积分账本。
         //
-        // 行为变更（2026-10-29）：**签到成功就记一条**，即使差额是 0 或算不出来。
+        // 语义是「记录签到这个事件及其可得的收益」，但有三处必须避开，
+        // 否则账本会给出错误的因果（这三处都是"看起来记了，其实记错"）：
         //
-        // 原逻辑是 `if (gained != null && gained != 0.0)` 才写 —— 后果是：
-        //   · 上游次日到账、或积分按批次发放时，差值是 0 → 不记账
-        //   · 签到后那次 refreshCredits 失败 → gained 为 null → 不记账
-        // 两种情况下界面显示「今日已签」，但「今日收支」里查无此项，
-        // 用户看到的就是「签到了但没计入收支」。
+        //  ① 【already 时不能再记一次收益】
+        //     gained = 签到后 - 签到前，already 情况下上游没有发放动作，
+        //     这个差额只反映期间的真实调用消耗 —— 把它记成 checkin 的正负值，
+        //     等于把「花掉的钱」记成「签到赚的钱」。already 一律记 0。
         //
-        // 现在的语义是「记录签到这个事件及其可得的收益」：
-        //   · 算得出非零差额 → 记真实数额（与原来一致）
-        //   · 算出来是 0 或算不出 → 记 0，note 里说明情况
-        // 记 0 不会让收支数字虚高（求和加 0 无影响），但让「今天签到过」
-        // 这件事在账本里可见 —— 这比精确数额更重要。
+        //  ② 【负差额不能记成签到亏损】
+        //     同理，如果差额为负，那是别的请求消耗掉的（ApiHostService 已按
+        //     kind=consume 单独记过一笔）。这里再记一个负数就是双重计算，
+        //     且会让「签到」这一类在收支里显示为亏损 —— 语义完全错位。
+        //     实际记 0，真实差额写进 note 供核对。
+        //
+        //  ③ 【同一账号同一天不重复写】
+        //     自动签到（ApiHostService.runAutomaticCheckin）与手动点「一键签到」
+        //     都会走到这里。原来每次点都插一行 0 值记录，点三次就是三行，
+        //     收支里的条数（by_kind.count）随之虚高。现在先查当天是否已有
+        //     checkin 记录，有则不再写。
+        //
+        // 记 0 不影响收支求和，但让「今天签到过」这件事在账本里可见 ——
+        // 这比精确数额更重要（上游不返回签到积分字段，差额是唯一证据）。
+        val recorded = checkinLedgerAmount(already, gained)
         val note = when {
-            already -> "补记签到变动"
+            already -> "今日已签到（未重复计分）"
             gained == null -> "每日签到（到账数额未确认）"
-            gained == 0.0 -> "每日签到（上游未即时到账）"
-            else -> "每日签到"
+            gained > 0 -> "每日签到"
+            else -> "每日签到（未即时到账；差额 %.1f 为期间调用消耗）".format(gained)
         }
-        store(context).recordCredit(account.key, "checkin", gained ?: 0.0, note)
+        val alreadyLogged = store(context).hasCreditToday(account.key, "checkin")
+        if (!alreadyLogged) {
+            store(context).recordCredit(account.key, "checkin", recorded, note)
+        }
 
         return JSONObject()
             .put("uid", account.uid).put("account_key", account.key)
@@ -745,9 +768,18 @@ object NativeCore {
             .put("credits_before", before ?: JSONObject.NULL)
             .put("credits_remaining", remaining ?: JSONObject.NULL)
             .put("credits_total", total ?: JSONObject.NULL)
+            // 对外仍给原始差额（界面要显示"本次 +N"），但语义上它只是快照差，
+            // 不保证等于签到奖励 —— message 里会说清是哪种情况。
             .put("credits_gained", gained ?: JSONObject.NULL)
+            .put("ledger_recorded", recorded)
+            .put("ledger_duplicate", alreadyLogged)
+            .put("snapshot_interval_ms", System.currentTimeMillis() - beforeAt)
             .put("message", buildCheckinMessage(already, before, remaining, gained))
     }
+
+    /** 某账号今天是否已记过某一类账（用于防止自动签到 + 手动签到重复记账）。 */
+    fun hasCreditToday(context: Context, accountKey: String, kind: String): Boolean =
+        store(context).hasCreditToday(accountKey, kind)
 
     /**
      * 拼签到结果文案。
@@ -764,34 +796,47 @@ object NativeCore {
         remaining: Double?,
         gained: Double?
     ): String {
-        val head = if (already) "今日已签到" else "签到成功"
         val remainText = remaining?.let { "%.1f".format(it) }
+        // already 分支必须单独处理：此时上游没有任何发放动作，
+        // 快照差只反映期间的调用消耗。原实现复用下面的分支，
+        // 会在「今日已签到」后面接一句「本次 +8.0 积分」——
+        // 那笔钱其实来自更早那次签到（或纯属期间没消耗），
+        // 用户点两次就会看到两个 +8，误以为刷一次得一次。
+        if (already) {
+            return if (remainText != null) {
+                "今日已签到（当前剩余 $remainText）。本次未重复发放，不计入收支。"
+            } else {
+                "今日已签到（额度查询失败，请稍后在账号页手动刷新）。"
+            }
+        }
         return when {
             gained != null && gained > 0 ->
-                "$head，本次 +%.1f 积分（当前剩余 $remainText）".format(gained)
+                "签到成功，本次 +%.1f 积分（当前剩余 $remainText）".format(gained)
             gained != null && gained == 0.0 ->
-                "$head，本次未增加积分（当前剩余 $remainText）。签到本身的奖励可能随后续活跃行为计分。"
+                "签到成功，本次未增加积分（当前剩余 $remainText）。签到本身的奖励可能随后续活跃行为计分。"
             gained != null ->
-                "$head（当前剩余 $remainText）。额度比签到前少 %.1f，通常是期间其它请求的消耗。".format(-gained)
+                "签到成功（当前剩余 $remainText）。额度比签到前少 %.1f，那是期间其它请求的消耗，不是签到扣的。".format(-gained)
             else ->
-                "$head（额度查询失败，请稍后在账号页手动刷新）"
+                "签到成功（额度查询失败，请稍后在账号页手动刷新）"
         }
     }
 
-    /** 读取本地缓存的剩余额度；未刷新过则返回 null。 */
     /**
      * 读取本地缓存的剩余额度；未刷新过则返回 null。
      *
-     * 注意取值路径：账号 JSON 由 NativeStore.accountJson 用 rowJson 平铺生成，
-     * credits_remaining 就在【根对象上】。
-     * 早先误取 account.profile（即 root.account），而账号表没有嵌套的 account 子对象，
-     * 于是永远读到 null，签到结果恒定显示"缺少签到前快照"。
+     * 【修正 2026-11-03】原实现读 `account.root`，而 `loadAccount` →
+     * `getAccountRoot` 返回的是**导入时的 auth_json 原文**，其中不含
+     * `credits_remaining`（那是 accounts 表的一列，由 setAccountCredits 写入）。
+     * 因此这个函数此前**永远返回 null**，注释里"credits_remaining 就在根对象上"
+     * 的说法只对 `listAccounts()`→`accountJson()` 成立，对 getAccountRoot 不成立。
+     *
+     * 现在改为直接读表（getAccount → accountJson 的平铺结果），这才是
+     * credits_remaining 真正所在的对象。
      */
     private fun readCachedCredits(context: Context, accountKey: String): Double? {
-        val account = loadAccount(context, accountKey) ?: return null
-        val root = account.root
-        if (root.isNull("credits_remaining")) return null
-        val value = root.optDouble("credits_remaining", Double.NaN)
+        val row = store(context).getAccount(accountKey) ?: return null
+        if (row.isNull("credits_remaining")) return null
+        val value = row.optDouble("credits_remaining", Double.NaN)
         return if (value.isFinite()) value else null
     }
 
@@ -1072,6 +1117,12 @@ object NativeCore {
 
     fun logUsage(context: Context, record: JSONObject): Long = store(context).logUsage(record)
     fun usageSummary(context: Context): JSONObject = store(context).usageSummary()
+
+    /** 今日各账号消耗明细（谁在花、花多少）。见 NativeStore.usageTodayByAccount。 */
+    fun usageTodayByAccount(context: Context): JSONArray = store(context).usageTodayByAccount()
+
+    /** 今日整体用量汇总，口径与 usageTodayByAccount 一致。 */
+    fun usageTodayTotals(context: Context): JSONObject = store(context).usageTodayTotals()
     fun usageRecent(context: Context, page: Int = 1, pageSize: Int = 20, protocol: String? = null, model: String? = null, appName: String? = null, status: String? = null, light: Boolean = true): JSONObject = store(context).usageRecent(page, pageSize, protocol, model, appName, status, light)
 
     /**
@@ -1422,5 +1473,35 @@ object NativeCore {
         // ③ 抖动 ±20%：避免多个账号同时恢复、又同时被打爆。
         val jitter = 0.8 + kotlin.random.Random.nextDouble() * 0.4
         return (raw * jitter).toLong().coerceIn(1L, BACKOFF_CAP_SECONDS)
+    }
+
+    /**
+     * 「收益类账目」应记的金额 —— 签到 / 任务 / 奖励共用这一条规则。
+     *
+     * 为什么单独抽出来：
+     *   这不是格式化，而是**账本正确性**的判定，三条规则任何一条漏掉都会让
+     *   「今日收支」给出错误的因果，而代码看起来完全正常：
+     *
+     *   ① already = true → 记 0。
+     *      上游没有发放动作，快照差只反映期间的调用消耗。记成收益就是无中生有。
+     *   ② gained < 0 → 记 0（不是记负数）。
+     *      那笔消耗已经由 ApiHostService 按 kind=consume 各记了一笔，
+     *      这里再记负数等于同一笔消耗算两次，而且会让"签到/任务"类目
+     *      在收支里永久显示为亏损 —— 语义完全错位。
+     *   ③ gained 不有限（NaN/Infinity）→ 记 0。
+     *      SQLite 会把 NaN 写成 NULL，触发 credit_ledger.amount 的 NOT NULL 约束，
+     *      使整条记录写入失败（usage_logs 曾因同类问题让记录页永久空白）。
+     *
+     * 三条都指向"宁可记 0"：记 0 不影响收支求和，但让"这件事发生过"可见。
+     * 抽成纯函数后可以单测覆盖（见 CheckinLedgerTest），不必联网跑完整签到。
+     *
+     * @return 应记入账本的金额；0 表示"这次没有可计入的收益"
+     */
+    fun checkinLedgerAmount(already: Boolean, gained: Double?): Double = when {
+        already -> 0.0
+        gained == null -> 0.0
+        !gained.isFinite() -> 0.0
+        gained > 0.0 -> gained
+        else -> 0.0
     }
 }

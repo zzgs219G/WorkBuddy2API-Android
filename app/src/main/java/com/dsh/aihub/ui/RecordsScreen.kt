@@ -2,8 +2,11 @@ package com.dsh.aihub.ui
 
 import android.content.Context
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.layout.Arrangement
@@ -12,7 +15,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
@@ -28,9 +30,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.dsh.aihub.AccountRegion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -119,15 +121,31 @@ fun RecordsScreen(context: Context, app: AppState) {
     ) {
         item {
             PcCard(title = "调用记录") {
-                // 4 行标签值 → 一排指标。
-                // 「总条数」与「当前筛选」的区别只在筛选时才有意义，
-                // 因此把筛选条数放进指标、总数降为小字。
-                PcMetricRow(
+                DashMetricGrid(
                     listOf(
-                        "本次筛选" to "${filtered.size}",
-                        "消耗积分" to "%.0f".format(totalCredits),
-                        "Tokens" to FormatKit.tokens(totalTokens),
-                    )
+                        DashMetric(
+                            label = "本次筛选",
+                            value = "${filtered.size}",
+                            unit = "条",
+                            hint = "共 ${app.usageTotal} 条记录",
+                        ),
+                        DashMetric(
+                            label = "消耗积分",
+                            value = "%.0f".format(totalCredits),
+                            valueColor = if (totalCredits > 0) MaterialTheme.colorScheme.error else null,
+                            hint = if (filtered.isNotEmpty()) {
+                                " ${(totalCredits / filtered.size).let { "%.2f".format(it) }} / 次"
+                            } else "—",
+                        ),
+                        DashMetric(
+                            label = "Tokens",
+                            value = FormatKit.tokens(totalTokens),
+                            hint = if (filtered.isNotEmpty()) {
+                                " ${FormatKit.tokens(totalTokens / filtered.size)} / 次"
+                            } else "—",
+                        ),
+                    ),
+                    perRow = 2,
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
@@ -170,6 +188,69 @@ fun RecordsScreen(context: Context, app: AppState) {
                         PcAction("清空全部记录", enabled = records.length() > 0) { showClearConfirm = true }
                     )
                 )
+            }
+        }
+
+        // ---------------- 今日按账号 ----------------
+        //
+        // 这是「消耗只能看到总数、不知道谁花的」在记录页的落点。
+        // 数据来源与概览页同一份（AppState.usageByAccount，SQL 按 account_uid 聚合），
+        // 不在这里重新查库 —— 两处口径必然一致。
+        //
+        // 为什么放在记录页而不是只在概览：
+        //   概览是"扫一眼"的地方，一行一账号够用；真正要核对某个号花了多少时，
+        //   用户会来记录页。这里给完整维度：请求数、成功率、tokens、消耗。
+        if (app.usageByAccount.length() > 0) {
+            item { DashSectionHeader(title = "今日按账号", subtitle = "谁在消耗、花了多少") }
+            item {
+                PcCard {
+                    // 用与 SQL 同源的排序规则（NativeStore.sortUsageByAccount），
+                    // 避免"库里排好了、界面上又打乱"的两套口径。
+                    val rows = com.dsh.aihub.NativeStore.sortUsageByAccount(app.usageByAccount)
+                    // 比例条的分母取「消耗最多的那个账号」而不是总和：
+                    // 一个号占 90% 消耗时，用总和作分母的条会短到看不出差别。
+                    val maxCredits = rows.maxOfOrNull { it.optDouble("credits", 0.0) } ?: 0.0
+                    rows.forEachIndexed { index, row ->
+                        if (index > 0) PcDivider()
+                        val uid = row.optString("account_uid")
+                        val credits = row.optDouble("credits", 0.0)
+                        val requests = row.optInt("requests")
+                        val failed = row.optInt("failed")
+                        val name = row.optString("name").ifBlank {
+                            if (uid.isBlank()) "未归属" else FormatKit.shortUid(uid)
+                        }
+                        DashRankRow(
+                            name = name,
+                            value = "%.1f".format(credits),
+                            detail = buildList {
+                                add("$requests 次")
+                                if (failed > 0) add("失败 $failed")
+                                add(FormatKit.tokens(row.optLong("tokens")) + " tok")
+                            }.joinToString(" · "),
+                            fraction = if (maxCredits > 0) (credits / maxCredits).toFloat() else null,
+                            status = when {
+                                requests == 0 -> DashStatus.IDLE
+                                failed == 0 -> DashStatus.OK
+                                failed * 2 > requests -> DashStatus.BAD
+                                else -> DashStatus.WARN
+                            },
+                        )
+                    }
+                    // 本列表刻意排除了 account_uid 为空的记录（按 `u.account_uid <> ''`），
+                    // 否则「未归属」会挤占一行、还会被算进"谁花得最多"的排行。
+                    // 但那部分请求可能已产生计费，因此这里把差额显式说出来 ——
+                    // 否则用户把各行消耗相加会得到比「今日消耗」小的数，进而认为统计坏了。
+                    val today = app.usageToday
+                    val unattributed = today?.optInt("unattributed") ?: 0
+                    val unattributedCredits = today?.optDouble("unattributed_credits", 0.0) ?: 0.0
+                    if (unattributed > 0 || unattributedCredits > 0) {
+                        Spacer(Modifier.height(PcTokens.SpaceS))
+                        DashCaption(
+                            "另有 $unattributed 次请求未归属到账号（被网关拒绝/无可用账号时仍可能计费），" +
+                                "消耗 %.1f 积分，已计入今日总消耗但不计入上方排行。".format(unattributedCredits)
+                        )
+                    }
+                }
             }
         }
 
@@ -305,6 +386,15 @@ private fun UsageRecordCard(
             //   第二行：时间 · 账号 · tokens · 耗时（一行小字）
             // 其余（应用、协议、完整 UID、错误详情）都在「查看内容」里。
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 状态点放在模型名前面：色点比「✗」更省横向空间，
+                // 且失败时整行小字已经是 error 色，不需要再多一个符号重复表达。
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(dashStatusColor(if (ok) DashStatus.OK else DashStatus.BAD))
+                )
+                Spacer(Modifier.width(6.dp))
                 Text(
                     item.optString("model", "auto"),
                     style = MaterialTheme.typography.bodyMedium,
@@ -312,16 +402,11 @@ private fun UsageRecordCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                if (!ok) {
-                    Text(
-                        "✗ ",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
                 Text(
+                    // 等宽字体 + 两位小数：一列记录右对齐后，扫一眼就能比出哪次最贵。
                     "%.2f".format(credits),
                     style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     color = if (ok) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.error
                 )

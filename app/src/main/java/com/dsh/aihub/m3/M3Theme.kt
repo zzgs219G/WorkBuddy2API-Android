@@ -46,10 +46,24 @@ private val LightColors = lightColorScheme(
 
     // surface 与 background 刻意取不同值：本应用大量使用 elevated card，
     // 需要卡片与页面底色之间有可辨识的层次，同值会让卡片边界完全消失。
-    surface = Color(0xFFFEF7FF),
+    //
+    // 【2026-11-03 调低 surface】原值与 background 完全相同（都是 FEF7FF），
+    // 只靠 1dp elevation 的阴影区分卡片 —— 在深色壁纸/低对比屏上几乎看不出边界，
+    // 整页读起来就是"一片浅色上飘着一堆文字"，这也是"简陋"观感的一部分。
+    // 现在 background 保持极浅的紫底、surface 略亮一点，形成"页面 < 卡片"的正向层次；
+    // surfaceContainerHighest 再深一档，专门给仪表盘的指标格用（格子要比卡片更"沉"）。
+    surface = Color(0xFFFDF8FD),
     onSurface = Color(0xFF1D1B20),
     surfaceVariant = Color(0xFFE7E0EC),
     onSurfaceVariant = Color(0xFF49454F),
+    // 容器层级：仪表盘的指标格 / 进度条底槽用 highest 一档。
+    // 这四个角色是 M3 1.2+ 的官方 surface container 分级，
+    // 不自己配色 —— 主题切换（含将来的动态取色）时它们会自动跟着走。
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF9F3FA),
+    surfaceContainer = Color(0xFFF4EEF5),
+    surfaceContainerHigh = Color(0xFFEEE8F0),
+    surfaceContainerHighest = Color(0xFFE9E3EB),
 
     outline = Color(0xFF79747E),
     outlineVariant = Color(0xFFCAC4D0)
@@ -81,10 +95,18 @@ private val DarkColors = darkColorScheme(
     background = Color(0xFF141218),
     onBackground = Color(0xFFE6E0E9),
 
-    surface = Color(0xFF141218),
+    // 深色下同样建立"页面 < 卡片 < 格子"的三级层次。
+    // 深色主题里 elevation 阴影几乎不可见，只能靠底色递进，
+    // 所以 surface 比 background 亮、containerHighest 再亮一档。
+    surface = Color(0xFF1B1921),
     onSurface = Color(0xFFE6E0E9),
     surfaceVariant = Color(0xFF49454F),
     onSurfaceVariant = Color(0xFFCAC4D0),
+    surfaceContainerLowest = Color(0xFF0F0D13),
+    surfaceContainerLow = Color(0xFF1B1921),
+    surfaceContainer = Color(0xFF1F1D24),
+    surfaceContainerHigh = Color(0xFF2A282F),
+    surfaceContainerHighest = Color(0xFF35323B),
 
     outline = Color(0xFF938F99),
     outlineVariant = Color(0xFF49454F)
