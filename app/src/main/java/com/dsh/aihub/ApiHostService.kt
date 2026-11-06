@@ -35,18 +35,33 @@ import java.util.concurrent.TimeUnit
 
 class ApiHostService : Service() {
     /**
-     * 有界工作线程池：原来用 newCachedThreadPool 无上限，突发的慢连接会瞬间堆出大量线程
-     * （每线程约 1MB 栈），常驻服务被 LMK 优先回收——与保活目标直接冲突。
-     * 上限 16 线程 + 64 队列已远超单机自用场景的实际并发，溢出时直接拒掉连接而不是拖垮进程。
+     * 请求工作线程池。
+     *
+     * 旧实现是 core=2 / max=16 / LinkedBlockingQueue(64)，看起来能并发 16，实际不能：
+     * ThreadPoolExecutor 只有在【队列塞满】之后才会把线程数从 core 扩到 max，
+     * 队列有 64 个空位，所以前 64 个请求永远只有 2 个线程在处理。
+     *
+     * 更致命的是 accept 循环（serve）本身也提交在这个池里，它会一直占住一个 core 线程，
+     * 于是真正能处理请求的只剩 1 个线程 —— 两个会话同时提问时，第二个请求会一直
+     * 排在第一个流式响应后面，表现就是「只能一个人用 / 两个对话串行」。
+     *
+     * 现在改为：
+     *   ① accept 循环移出线程池，用独立线程（见 startAcceptLoop）；
+     *   ② 工作池改用 SynchronousQueue + core=0/max=16：来任务时优先复用空闲线程，
+     *      没有空闲线程就直接新建，最多 16 个并发，不再把请求塞进深队列里"假并发"。
+     *      16 个并发已远超单机自用场景；真打满时直接拒掉连接（AbortPolicy），
+     *      由客户端重试，而不是把请求无限堆积在内存里。
      */
     private val workers = java.util.concurrent.ThreadPoolExecutor(
-        2, 16, 60L, TimeUnit.SECONDS,
-        java.util.concurrent.LinkedBlockingQueue(64),
+        0, 16, 60L, TimeUnit.SECONDS,
+        java.util.concurrent.SynchronousQueue(),
         Executors.defaultThreadFactory(),
         java.util.concurrent.ThreadPoolExecutor.AbortPolicy()
     )
     private val maintenance = Executors.newSingleThreadScheduledExecutor()
     @Volatile private var server: ServerSocket? = null
+    /** accept 循环专用线程：绝不能占用工作线程，否则会永久吃掉一个并发槽位。 */
+    @Volatile private var acceptThread: Thread? = null
     // 常驻部分唤醒锁：Cached App Freezer 会跳过持有 wakelock 的进程（官方豁免行为），
     // 没有它，APP 退后台后会被 MIUI/原生冻结器冻结，本地反代端口仍在监听但进程不调度、请求全部挂起。
     private var wakeLock: PowerManager.WakeLock? = null
@@ -57,7 +72,7 @@ class ApiHostService : Service() {
         acquireWakeLock()
         startForeground(NOTIFICATION_ID, notification("正在启动原生 API…"))
         scheduleWatchdog()
-        workers.execute { serve() }
+        startAcceptLoop()
         maintenance.scheduleWithFixedDelay({ runMaintenanceTick() }, 5, 60, TimeUnit.SECONDS)
         // 悬浮窗：可选加固项，提升进程到 VISIBLE 档，降低内存吃紧时被 LMK 回收的概率。
         // 未授权/未开启时内部自行跳过，不会影响服务本体。
@@ -209,6 +224,21 @@ class ApiHostService : Service() {
         return if (allowLan) LAN_ANY else LOOPBACK
     }
 
+    /**
+     * 启动 accept 循环。
+     *
+     * 必须用独立线程，不能丢进 [workers]：accept 是死循环，会一直占住一个工作线程。
+     * 旧实现把它提交进 core=2 的线程池，等于把可用并发从 2 又砍到 1，
+     * 这是「两个会话只有一个在跑」的直接原因。
+     */
+    private fun startAcceptLoop() {
+        if (acceptThread?.isAlive == true) return
+        acceptThread = Thread({ serve() }, "api-accept").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     private fun serve() {
         try {
             val bindHost = resolveBindHost()
@@ -241,25 +271,68 @@ class ApiHostService : Service() {
     }
 
     /**
-     * 从请求头提取会话标识，供会话粘性选号使用。
+     * 提取「一个对话框」的会话标识，供会话粘性选号与上游会话 ID 使用。
      *
      * 按优先级取：
      *   1. X-Conversation-ID —— 官方 CLI 用它，最准
      *   2. X-Session-ID / Session-Id —— 常见客户端约定
-     *   3. Authorization 的 key 前缀 —— 同一 API key 视为同一会话的粗粒度兜底
+     *   3. 首条 user 消息的指纹 —— 客户端不带会话头时的兜底
+     *   4. Authorization 的 key —— 最后兜底（整把 Key 共用一个账号）
      *
-     * 都取不到返回 null，退化为普通加权选号（行为与引入粘性前一致）。
+     * 为什么需要第 3 步：
+     *   绝大多数客户端（Cherry Studio、NextChat 等）发 /v1/chat/completions 时
+     *   并不带会话头。若直接按 API Key 分组，同一个 Key 下的所有对话框都会被当成
+     *   同一个会话：不仅共用同一个上游 X-Conversation-ID（上下文会串），
+     *   多账号时也永远只绑到一个账号——这正是「一个 Key 多个对话框」失效的根源。
+     *
+     *   同一个对话框每一轮都会把历史消息重新发一遍，messages[0] 的首条 user 内容
+     *   始终不变；不同对话框的首条 user 内容通常不同。因此用「Key + 首条 user 消息」
+     *   做 SHA-256 指纹，可以稳定区分多个对话框，又不会在轮次之间跳号。
      */
-    private fun sessionKeyFor(headers: Map<String, String>): String? {
+    private fun sessionKeyFor(headers: Map<String, String>, body: JSONObject): String? {
         headers["x-conversation-id"]?.takeIf { it.isNotBlank() }?.let { return it }
         headers["x-session-id"]?.takeIf { it.isNotBlank() }?.let { return it }
         headers["session-id"]?.takeIf { it.isNotBlank() }?.let { return it }
-        // 兜底：按 API key 分组。注意这是「每个客户端固定一个账号」而非真正的会话级，
-        // 粒度更粗，但比完全没有粘性好——至少同一个客户端的连续对话不会跳号。
-        headers["authorization"]?.removePrefix("Bearer ")?.trim()?.takeIf { it.isNotBlank() }?.let {
-            return "key:" + Integer.toHexString(it.hashCode())
+
+        // 与 authorizedApp 保持同一套取 Key 规则：OpenAI 客户端用 Authorization: Bearer，
+        // Anthropic 客户端用 x-api-key。少认一种，多 Key 场景下就会把不同用户混到同一桶。
+        val bearer = headers["authorization"]
+            ?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }
+            ?.substring(7)?.trim()
+        val apiKey = bearer?.takeIf { it.isNotBlank() }
+            ?: headers["x-api-key"]?.trim()?.takeIf { it.isNotBlank() }
+        val firstUserMessage = firstUserMessageText(body)
+        if (firstUserMessage != null) {
+            // 把 Key 一起纳入指纹：不同 Key 即使开场白相同，也必须是不同会话，
+            // 否则两个用户会被绑到同一个账号/同一个上游会话上。
+            return "conv:" + sha256Hex((apiKey ?: "") + "\u0000" + firstUserMessage).take(32)
+        }
+        // 连 user 消息都取不到（极少见）时，才退回整把 Key 共用一个账号。
+        return apiKey?.let { "key:" + sha256Hex(it).take(32) }
+    }
+
+    /** 取 messages 里第一条 user 消息的文本，作为对话框指纹。 */
+    private fun firstUserMessageText(body: JSONObject): String? {
+        val messages = body.optJSONArray("messages") ?: return null
+        for (i in 0 until messages.length()) {
+            val message = messages.optJSONObject(i) ?: continue
+            if (message.optString("role") != "user") continue
+            val content = message.opt("content") ?: continue
+            val text = content.toString()
+            if (text.isNotBlank() && text != "null") return text
         }
         return null
+    }
+
+    private fun sha256Hex(text: String): String {
+        val bytes = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(StandardCharsets.UTF_8))
+        val out = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val value = b.toInt() and 0xff
+            out.append(HEX[value ushr 4]).append(HEX[value and 0x0f])
+        }
+        return out.toString()
     }
 
     private fun handle(socket: Socket) {
@@ -419,6 +492,9 @@ class ApiHostService : Service() {
             else -> null
         }
         val region = AccountRegion.fromStrict(app.optString("region"))
+        // 会话标识只算一次：换号重试时也必须沿用同一个对话框身份，
+        // 否则重试会换到另一个会话绑定上，上下文和账号粘性都会乱。
+        val sessionKey = sessionKeyFor(reqHeaders, chatBody)
         var account: NativeCore.Account? = null
         var call: okhttp3.Call? = null
         var response: Response? = null
@@ -436,9 +512,9 @@ class ApiHostService : Service() {
             // 顺序不能改：早期版本只重试不冷却，结果重试又选中同一个号，等于没重试。
             var attempt = 0
             while (true) {
-                // 会话粘性：拿到本次请求的会话标识，让同一会话固定同一账号。
-                // 没有会话头时传 null，退化为普通加权选号（行为与之前一致）。
-                val upstream = NativeCore.upstreamRequest(this, chatBody, region, sessionKeyFor(reqHeaders))
+                // 会话粘性：同一个对话框固定同一账号；不同对话框可以落到不同账号。
+                // sessionKey 已在循环外算好，重试换号时仍沿用同一身份。
+                val upstream = NativeCore.upstreamRequest(this, chatBody, region, sessionKey)
                 account = upstream.account
                 call = NativeCore.http.newCall(upstream.request)
                 // 网络层异常单独兜一层：连接被重置/DNS 抖动/复用到死连接时，
@@ -1087,6 +1163,10 @@ class ApiHostService : Service() {
         running = false
         runCatching { FloatingWindowKeeper.hide(this) }
         runCatching { server?.close() }
+        // accept 线程会因 socket 关闭而退出；再 interrupt 一次兜底，
+        // 防止极端情况下它卡在 accept/绑定阶段。
+        acceptThread?.interrupt()
+        acceptThread = null
         releaseWakeLock()
         workers.shutdownNow()
         maintenance.shutdownNow()
@@ -1100,6 +1180,8 @@ class ApiHostService : Service() {
 
     companion object {
         const val PORT = 8788
+        /** SHA-256 十六进制输出用，避免每字节一次 String.format。 */
+        private val HEX = "0123456789abcdef".toCharArray()
         /** 默认监听地址：只绑回环，本机之外的设备无法连接。 */
         private const val LOOPBACK = "127.0.0.1"
         /** 开启「允许局域网访问」后的监听地址。 */

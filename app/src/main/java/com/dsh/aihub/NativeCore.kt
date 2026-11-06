@@ -307,8 +307,12 @@ object NativeCore {
     // 同样不加 @Synchronized：函数体内没有共享可变状态，
     // SessionTracker 自身保证并发安全。挂在对话热路径上的全局锁
     // 会把所有并发的对话请求串行化。
-    private fun headersForConversation(context: Context, account: Account): MutableMap<String, String> {
-        val session = SessionTracker.sessionFor(context, account.key)
+    private fun headersForConversation(
+        context: Context,
+        account: Account,
+        sessionKey: String? = null,
+    ): MutableMap<String, String> {
+        val session = SessionTracker.sessionFor(context, account.key, sessionKey)
         val messageId = SessionTracker.newMessageId()
         // 本轮请求 ID：官方在一次 user send 开始时生成、该轮所有请求复用。
         // 反代这里一个请求就是一轮，故按请求生成一个独立 id。
@@ -1089,7 +1093,7 @@ object NativeCore {
         // 主对话走会话头版本：官方每一笔对话请求都挂会话上下文，
         // 这也是「反代看起来像 CLI」最关键的一层（详见 headersForConversation 注释）。
         val url = "${account.backend}/v2/chat/completions"
-        val headers = headersForConversation(context, account)
+        val headers = headersForConversation(context, account, sessionKey)
         // 出网取证：记录【最终交给 OkHttp 的那一份】headers/body。
         //
         // 为什么要在这里记、而不是在 request() 里统一记：

@@ -77,11 +77,16 @@ object SessionTracker {
      *
      * @param context 用于持久化，进程重启后会话 ID 不丢（否则每次重启都换 ID，更可疑）
      * @param accountKey 账号唯一键 —— 不同账号绝不共享会话 ID
+     * @param scope 客户端对话框标识。非空时按「账号 + 对话框」分桶：
+     *   同一个 Key 下的多个对话框必须各自拥有独立的 X-Conversation-ID，
+     *   否则两个对话框在上游看起来是同一个会话，上下文会串，部分上游还会
+     *   按会话串行处理请求。为空时才退化为「一个账号一个会话」的旧行为。
      */
     @Synchronized
-    fun sessionFor(context: Context, accountKey: String): Session {
+    fun sessionFor(context: Context, accountKey: String, scope: String? = null): Session {
+        val bucket = bucketKey(accountKey, scope)
         val now = System.currentTimeMillis()
-        val existing = cache[accountKey] ?: restore(context, accountKey)
+        val existing = cache[bucket] ?: restore(context, bucket)
 
         if (existing != null &&
             now - existing.lastActiveAt < IDLE_ROTATE_MS &&
@@ -89,7 +94,7 @@ object SessionTracker {
         ) {
             existing.lastActiveAt = now
             existing.messageCount++
-            persist(context, accountKey, existing)
+            persist(context, bucket, existing)
             return existing
         }
 
@@ -100,10 +105,14 @@ object SessionTracker {
             lastActiveAt = now,
             messageCount = 1
         )
-        cache[accountKey] = fresh
-        persist(context, accountKey, fresh)
+        cache[bucket] = fresh
+        persist(context, bucket, fresh)
         return fresh
     }
+
+    /** 缓存/持久化分桶键：没有对话框标识时保持旧的「一账号一会话」行为。 */
+    private fun bucketKey(accountKey: String, scope: String?): String =
+        if (scope.isNullOrBlank()) accountKey else "$accountKey|$scope"
 
     /**
      * 为一次请求生成消息级标识。
@@ -115,9 +124,9 @@ object SessionTracker {
      */
     fun newMessageId(): String = UuidFactory.v7Hex()
 
-    private fun prefKey(accountKey: String) = "sess_$accountKey"
+    private fun prefKey(bucket: String) = "sess_$bucket"
 
-    private fun persist(context: Context, accountKey: String, session: Session) {
+    private fun persist(context: Context, bucket: String, session: Session) {
         // 存成单行字符串，避免多条 prefs 写入不一致
         val payload = listOf(
             session.conversationId,
@@ -126,12 +135,12 @@ object SessionTracker {
             session.messageCount.toString()
         ).joinToString("|")
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(prefKey(accountKey), payload).apply()
+            .edit().putString(prefKey(bucket), payload).apply()
     }
 
-    private fun restore(context: Context, accountKey: String): Session? {
+    private fun restore(context: Context, bucket: String): Session? {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(prefKey(accountKey), null) ?: return null
+            .getString(prefKey(bucket), null) ?: return null
         val parts = raw.split("|")
         if (parts.size != 4) return null
         return try {
@@ -140,7 +149,7 @@ object SessionTracker {
                 startedAt = parts[1].toLong(),
                 lastActiveAt = parts[2].toLong(),
                 messageCount = parts[3].toInt()
-            ).also { cache[accountKey] = it }
+            ).also { cache[bucket] = it }
         } catch (e: NumberFormatException) {
             null
         }
